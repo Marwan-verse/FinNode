@@ -24,6 +24,27 @@ FinNode is a Tauri HUD for desktop project nodes.
 - Windows executable from Linux: `npm run make:windows`
 - Windows executable helper: `./scripts/make-windows-executable.sh`
 
+### Linux desktop prerequisites
+
+For `npm run build:exe` on Linux, install Tauri system dependencies first:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+	pkg-config \
+	libgtk-3-dev \
+	libayatana-appindicator3-dev \
+	librsvg2-dev \
+	libsoup2.4-dev \
+	patchelf
+
+# Ubuntu 20.04/22.04
+sudo apt-get install -y libwebkit2gtk-4.0-dev
+
+# Ubuntu 24.04+
+sudo apt-get install -y libwebkit2gtk-4.1-dev
+```
+
 ## Notes
 
 - Layout data is saved to the app config directory as `FinNode/config.json`.

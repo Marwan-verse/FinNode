@@ -54,7 +54,7 @@ EOF
 fi
 
 echo "[FinNode] Installing npm dependencies..."
-npm install
+npm install --include=dev
 
 echo "[FinNode] Building web assets..."
 npm run build:web

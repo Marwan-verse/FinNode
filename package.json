@@ -7,9 +7,9 @@
     "dev": "vite",
     "dev:desktop": "tauri dev",
     "build:web": "vite build",
-    "build:exe": "tauri build",
+    "build:exe": "bash ./scripts/make-executable.sh",
     "build:windows": "bash ./scripts/make-windows-executable.sh",
-    "make": "tauri build",
+    "make": "bash ./scripts/make-executable.sh",
     "make:windows": "bash ./scripts/make-windows-executable.sh"
   },
   "dependencies": {

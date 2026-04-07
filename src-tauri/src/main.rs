@@ -115,8 +115,12 @@ fn main() {
 }
 
 fn create_state() -> AppState {
-  let base_dir = config_dir().unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-  let layout_path = base_dir.join("FinNode").join("config.json");
+  let base_dir = config_dir().unwrap_or_else(|_| {
+    std::env::current_dir()
+      .unwrap_or_else(|_| PathBuf::from("."))
+      .join("FinNode")
+  });
+  let layout_path = base_dir.join("config.json");
   AppState {
     layout_path,
     cached_layout: Arc::new(Mutex::new(ProjectLayout::default())),
