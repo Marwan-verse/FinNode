@@ -44,6 +44,7 @@ struct AppState {
   layout_path: PathBuf,
   cached_layout: Arc<Mutex<ProjectLayout>>,
   stealth: Arc<Mutex<bool>>,
+  desktop_visible: Arc<Mutex<bool>>,
 }
 
 #[tauri::command]
@@ -97,6 +98,20 @@ fn set_stealth_mode(app: AppHandle, window: Window, state: State<'_, AppState>, 
 }
 
 #[tauri::command]
+fn set_desktop_visibility(app: AppHandle, state: State<'_, AppState>, visible: bool) -> Result<(), String> {
+  {
+    let mut desktop_visible = state
+      .desktop_visible
+      .lock()
+      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
+    *desktop_visible = visible;
+  }
+
+  let _ = app.emit_all("desktop-visibility-changed", visible);
+  Ok(())
+}
+
+#[tauri::command]
 fn hide_main_window(window: Window) -> Result<(), String> {
   window.hide().map_err(|err| err.to_string())
 }
@@ -110,17 +125,26 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn show_settings_view(app: AppHandle) -> Result<(), String> {
+  show_main_window(app.clone())?;
+  let _ = app.emit_all("open-settings-tab", "general");
+  Ok(())
+}
+
+#[tauri::command]
 fn exit_app(app: AppHandle) {
   app.exit(0);
 }
 
 fn build_system_tray() -> SystemTray {
-  let open_item = CustomMenuItem::new("open", "Open FinNode");
-  let hide_item = CustomMenuItem::new("hide", "Hide");
+  let open_item = CustomMenuItem::new("open-settings", "Open Settings");
+  let stealth_item = CustomMenuItem::new("toggle-stealth", "Toggle Stealth");
+  let desktop_item = CustomMenuItem::new("toggle-desktop", "Show/Hide Desktop Nodes");
   let exit_item = CustomMenuItem::new("exit", "Exit");
   let tray_menu = SystemTrayMenu::new()
     .add_item(open_item)
-    .add_item(hide_item)
+    .add_item(stealth_item)
+    .add_item(desktop_item)
     .add_native_item(SystemTrayMenuItem::Separator)
     .add_item(exit_item);
 
@@ -133,19 +157,48 @@ fn main() {
     .manage(create_state())
     .on_system_tray_event(|app, event| match event {
       SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
-        "open" => {
-          let _ = show_main_window(app.clone());
+        "open-settings" => {
+          let _ = show_settings_view(app.clone());
         }
-        "hide" => {
+        "toggle-stealth" => {
+          let state = app.state::<AppState>();
+          let next_enabled = match state.stealth.lock() {
+            Ok(mut stealth) => {
+              *stealth = !*stealth;
+              *stealth
+            }
+            Err(_) => {
+              eprintln!("failed to toggle stealth mode from tray: lock poisoned");
+              return;
+            }
+          };
+
           if let Some(window) = app.get_window("main") {
-            let _ = window.hide();
+            let _ = apply_stealth_mode(&window, next_enabled);
           }
+
+          let _ = app.emit_all("stealth-changed", next_enabled);
+        }
+        "toggle-desktop" => {
+          let state = app.state::<AppState>();
+          let next_visible = match state.desktop_visible.lock() {
+            Ok(mut desktop_visible) => {
+              *desktop_visible = !*desktop_visible;
+              *desktop_visible
+            }
+            Err(_) => {
+              eprintln!("failed to toggle desktop visibility from tray: lock poisoned");
+              return;
+            }
+          };
+
+          let _ = app.emit_all("desktop-visibility-changed", next_visible);
         }
         "exit" => app.exit(0),
         _ => {}
       },
       SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
-        let _ = show_main_window(app.clone());
+        let _ = show_settings_view(app.clone());
       }
       _ => {}
     })
@@ -177,8 +230,10 @@ fn main() {
       save_layout,
       launch_node,
       set_stealth_mode,
+      set_desktop_visibility,
       hide_main_window,
       show_main_window,
+      show_settings_view,
       exit_app
     ])
     .run(tauri::generate_context!())
@@ -196,6 +251,7 @@ fn create_state() -> AppState {
     layout_path,
     cached_layout: Arc::new(Mutex::new(ProjectLayout::default())),
     stealth: Arc::new(Mutex::new(false)),
+    desktop_visible: Arc::new(Mutex::new(false)),
   }
 }
 

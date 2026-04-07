@@ -3,23 +3,178 @@
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
 
+  const SETTINGS_KEY = 'finnode.settings.v1';
+  const settingsTabs = [
+    { id: 'general', label: 'General' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'nodes', label: 'Nodes' },
+    { id: 'tray', label: 'Tray' },
+    { id: 'shortcuts', label: 'Shortcuts' },
+  ];
+
+  const nodeTemplates = [
+    {
+      id: 'web-project',
+      name: 'Web Project',
+      icon: '◈',
+      description: 'Frontend app + docs + browser',
+      browser: 'https://vite.dev',
+      script: 'npm run dev',
+    },
+    {
+      id: 'rust-app',
+      name: 'Rust App',
+      icon: '⬡',
+      description: 'Cargo workflow and crates links',
+      browser: 'https://crates.io',
+      script: 'cargo check',
+    },
+    {
+      id: 'docs-hub',
+      name: 'Documentation Hub',
+      icon: '⟡',
+      description: 'Notes, references, and quick links',
+      browser: 'https://doc.rust-lang.org',
+      script: 'npm run build:web',
+    },
+    {
+      id: 'research-stack',
+      name: 'Research Stack',
+      icon: '⟁',
+      description: 'Context, ideas, and experiments',
+      browser: 'https://github.com/trending',
+      script: 'npm run build:web',
+    },
+  ];
+
   let nodes = [];
+  let renderNodes = [];
+  let smoothNodes = [];
   let stealth = false;
+  let showDesktop = false;
+  let activeTab = 'general';
   let draggingId = null;
   let dragOffset = { x: 0, y: 0 };
   let pendingPointer = null;
   let dragFrame = null;
+  let nodeSpringFrame = null;
   let saveTimer = null;
   let statusText = 'Loading layout...';
   let fatalError = '';
-  let showDesktop = false;
+  let selectedTemplate = nodeTemplates[0].id;
+  let activityLog = [];
 
   let nodeLayer;
   let viewBox = '0 0 1 1';
   let links = [];
 
   const nodeElements = new Map();
-  const sharkWidths = [48, 74, 56, 92, 66];
+  let settings = loadSettings();
+
+  function createDefaultSettings() {
+    return {
+      general: {
+        openOnLogin: false,
+        startMinimizedToTray: false,
+        restoreLastMode: true,
+        lastMode: 'settings',
+      },
+      appearance: {
+        motionScale: 1,
+        nodeGlow: 0.45,
+        showGrid: true,
+      },
+      nodes: {
+        showDesktop: false,
+        smoothness: 0.2,
+      },
+      tray: {
+        leftClickAction: 'open-settings',
+      },
+      shortcuts: {
+        toggleStealth: 'Alt+S',
+      },
+    };
+  }
+
+  function cloneObject(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function mergeSettings(base, incoming) {
+    const next = cloneObject(base);
+    if (!incoming || typeof incoming !== 'object') {
+      return next;
+    }
+
+    for (const [key, value] of Object.entries(incoming)) {
+      if (value && typeof value === 'object' && !Array.isArray(value) && next[key] && typeof next[key] === 'object' && !Array.isArray(next[key])) {
+        next[key] = mergeSettings(next[key], value);
+      } else if (value !== undefined) {
+        next[key] = value;
+      }
+    }
+
+    return next;
+  }
+
+  function loadSettings() {
+    const defaults = createDefaultSettings();
+    if (typeof window === 'undefined') {
+      return defaults;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(SETTINGS_KEY);
+      if (!raw) {
+        return defaults;
+      }
+      const parsed = JSON.parse(raw);
+      return mergeSettings(defaults, parsed);
+    } catch {
+      return defaults;
+    }
+  }
+
+  function persistSettings() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  function updateSettings(mutator) {
+    const next = cloneObject(settings);
+    mutator(next);
+    settings = next;
+    persistSettings();
+  }
+
+  function recordActivity(message) {
+    const timestamp = new Date().toLocaleTimeString();
+    activityLog = [{ id: `${Date.now()}-${Math.random()}`, text: `${timestamp} - ${message}` }, ...activityLog].slice(0, 24);
+  }
+
+  $: {
+    const smoothMap = new Map(smoothNodes.map((item) => [item.id, item]));
+    renderNodes = nodes.map((node) => {
+      const smooth = smoothMap.get(node.id);
+      return {
+        ...node,
+        renderX: smooth ? smooth.x : node.x,
+        renderY: smooth ? smooth.y : node.y,
+      };
+    });
+  }
+
+  $: {
+    if (typeof document !== 'undefined') {
+      document.body.classList.toggle('is-stealth', stealth);
+      document.documentElement.style.setProperty('--motion-scale', String(Math.max(0.4, settings.appearance.motionScale)));
+      document.documentElement.style.setProperty('--node-glow', String(Math.max(0.15, settings.appearance.nodeGlow)));
+      document.documentElement.style.setProperty('--grid-opacity', settings.appearance.showGrid ? '0.4' : '0');
+    }
+  }
 
   function nodeRef(element, id) {
     nodeElements.set(id, element);
@@ -36,26 +191,147 @@
     void tick().then(renderConnections);
   }
 
+  function startNodeSpring() {
+    if (nodeSpringFrame !== null) {
+      return;
+    }
+    nodeSpringFrame = window.requestAnimationFrame(stepNodeSpring);
+  }
+
+  function syncSmoothNodes(immediate = false) {
+    const current = new Map(smoothNodes.map((item) => [item.id, item]));
+
+    smoothNodes = nodes.map((node) => {
+      const existing = current.get(node.id);
+      if (!existing || immediate) {
+        return { id: node.id, x: node.x, y: node.y, vx: 0, vy: 0 };
+      }
+      return existing;
+    });
+
+    if (immediate) {
+      smoothNodes = smoothNodes.map((item) => {
+        const target = nodes.find((node) => node.id === item.id);
+        if (!target) {
+          return item;
+        }
+        return { ...item, x: target.x, y: target.y, vx: 0, vy: 0 };
+      });
+    }
+
+    startNodeSpring();
+  }
+
+  function stepNodeSpring() {
+    nodeSpringFrame = null;
+    if (!smoothNodes.length) {
+      return;
+    }
+
+    const stiffness = Math.max(0.08, Math.min(0.45, settings.nodes.smoothness));
+    const damping = 0.82;
+    const targets = new Map(nodes.map((node) => [node.id, node]));
+    let active = false;
+
+    smoothNodes = smoothNodes.map((item) => {
+      const target = targets.get(item.id);
+      if (!target) {
+        return item;
+      }
+
+      if (draggingId === item.id) {
+        return { ...item, x: target.x, y: target.y, vx: 0, vy: 0 };
+      }
+
+      const dx = target.x - item.x;
+      const dy = target.y - item.y;
+      const vx = (item.vx + dx * stiffness) * damping;
+      const vy = (item.vy + dy * stiffness) * damping;
+      const x = item.x + vx;
+      const y = item.y + vy;
+
+      if (Math.abs(dx) > 0.14 || Math.abs(dy) > 0.14 || Math.abs(vx) > 0.14 || Math.abs(vy) > 0.14) {
+        active = true;
+      }
+
+      return { ...item, x, y, vx, vy };
+    });
+
+    queueRenderConnections();
+    if (active) {
+      nodeSpringFrame = window.requestAnimationFrame(stepNodeSpring);
+    }
+  }
+
+  async function syncDesktopVisibilityWithBackend(visible) {
+    try {
+      await invoke('set_desktop_visibility', { visible });
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function applyDesktopVisibility(visible, syncBackend = true) {
+    const nextVisible = Boolean(visible);
+    showDesktop = nextVisible;
+
+    updateSettings((draft) => {
+      draft.nodes.showDesktop = nextVisible;
+      if (draft.general.restoreLastMode) {
+        draft.general.lastMode = nextVisible ? 'desktop' : 'settings';
+      }
+    });
+
+    if (syncBackend) {
+      void syncDesktopVisibilityWithBackend(nextVisible);
+    }
+
+    queueRenderConnections();
+  }
+
   async function bootstrap() {
     const unlistenStealth = await listen('stealth-changed', ({ payload }) => {
       stealth = Boolean(payload);
-      syncStealthUi();
+      updateStatus(`Stealth mode ${stealth ? 'enabled' : 'disabled'}`);
     });
 
     const unlistenLayout = await listen('layout-updated', async () => {
       const layout = await loadLayout();
       nodes = layout?.nodes ?? [];
+      syncSmoothNodes(true);
       updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
-      queueRenderConnections();
+    });
+
+    const unlistenDesktop = await listen('desktop-visibility-changed', ({ payload }) => {
+      applyDesktopVisibility(Boolean(payload), false);
+      updateStatus(`Desktop nodes ${Boolean(payload) ? 'shown' : 'hidden'} from tray`);
+    });
+
+    const unlistenOpenSettings = await listen('open-settings-tab', ({ payload }) => {
+      activeTab = typeof payload === 'string' ? payload : 'general';
+      applyDesktopVisibility(false, false);
+      updateStatus('Opened settings from tray');
     });
 
     const layout = await loadLayout();
     nodes = layout?.nodes ?? [];
+    syncSmoothNodes(true);
+
+    if (settings.general.restoreLastMode) {
+      showDesktop = settings.general.lastMode === 'desktop';
+    } else {
+      showDesktop = settings.nodes.showDesktop;
+    }
+
+    await syncDesktopVisibilityWithBackend(showDesktop);
     updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
-    syncStealthUi();
     queueRenderConnections();
 
-    const onResize = () => renderConnections();
+    if (settings.general.startMinimizedToTray) {
+      void hideToTray();
+    }
+
+    const onResize = () => queueRenderConnections();
     const onMove = (event) => onPointerMove(event);
     const onUp = () => onPointerUp();
 
@@ -66,18 +342,25 @@
     return () => {
       unlistenStealth();
       unlistenLayout();
+      unlistenDesktop();
+      unlistenOpenSettings();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       if (saveTimer) {
         window.clearTimeout(saveTimer);
       }
+      if (dragFrame !== null) {
+        window.cancelAnimationFrame(dragFrame);
+      }
+      if (nodeSpringFrame !== null) {
+        window.cancelAnimationFrame(nodeSpringFrame);
+      }
     };
   }
 
   async function loadLayout() {
     const layout = await invoke('load_layout');
-    updateStatus('Layout loaded from the app config directory');
     return layout;
   }
 
@@ -103,7 +386,7 @@
     viewBox = `0 0 ${bounds.width} ${bounds.height}`;
 
     const next = [];
-    for (const node of nodes) {
+    for (const node of renderNodes) {
       for (const targetId of node.links ?? []) {
         const sourceEl = nodeElements.get(node.id);
         const targetEl = nodeElements.get(targetId);
@@ -173,30 +456,9 @@
       node.x = pointer.x - layerRect.left - dragOffset.x;
       node.y = pointer.y - layerRect.top - dragOffset.y;
       nodes = [...nodes];
-      queueRenderConnections();
+      startNodeSpring();
       scheduleSave();
     });
-  }
-
-  async function hideToTray() {
-    try {
-      await invoke('hide_main_window');
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function exitApp() {
-    try {
-      await invoke('exit_app');
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function toggleDesktop() {
-    showDesktop = !showDesktop;
-    queueRenderConnections();
   }
 
   function onPointerUp() {
@@ -226,7 +488,12 @@
     saveTimer = window.setTimeout(async () => {
       await invoke('save_layout', { layout: { nodes } });
       updateStatus('Layout saved to disk');
-    }, 250);
+    }, 220);
+  }
+
+  function updateStatus(text) {
+    statusText = text;
+    recordActivity(text);
   }
 
   async function launchNode(node, action) {
@@ -236,14 +503,6 @@
     } catch (error) {
       updateStatus(error instanceof Error ? error.message : String(error));
     }
-  }
-
-  function updateStatus(text) {
-    statusText = text;
-  }
-
-  function syncStealthUi() {
-    document.body.classList.toggle('is-stealth', stealth);
   }
 
   async function toggleStealth() {
@@ -264,6 +523,161 @@
     } catch (error) {
       updateStatus(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function hideToTray() {
+    try {
+      await invoke('hide_main_window');
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openSettingsFromTray() {
+    try {
+      await invoke('show_settings_view');
+      activeTab = 'general';
+      applyDesktopVisibility(false, true);
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function exitApp() {
+    try {
+      await invoke('exit_app');
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function toggleDesktop() {
+    applyDesktopVisibility(!showDesktop, true);
+  }
+
+  function updateSmoothness(value) {
+    const parsed = Number(value);
+    updateSettings((draft) => {
+      draft.nodes.smoothness = Number.isFinite(parsed) ? parsed : draft.nodes.smoothness;
+    });
+    startNodeSpring();
+  }
+
+  function updateMotionScale(value) {
+    const parsed = Number(value);
+    updateSettings((draft) => {
+      draft.appearance.motionScale = Number.isFinite(parsed) ? parsed : draft.appearance.motionScale;
+    });
+  }
+
+  function updateNodeGlow(value) {
+    const parsed = Number(value);
+    updateSettings((draft) => {
+      draft.appearance.nodeGlow = Number.isFinite(parsed) ? parsed : draft.appearance.nodeGlow;
+    });
+  }
+
+  function toggleGrid(enabled) {
+    updateSettings((draft) => {
+      draft.appearance.showGrid = enabled;
+    });
+  }
+
+  function uniqueNodeId(base) {
+    return `${base}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function addNodeFromTemplate() {
+    const template = nodeTemplates.find((item) => item.id === selectedTemplate) ?? nodeTemplates[0];
+    const offset = nodes.length * 18;
+    const node = {
+      id: uniqueNodeId(template.id),
+      name: template.name,
+      icon: template.icon,
+      description: template.description,
+      x: 90 + offset,
+      y: 110 + offset,
+      links: [],
+      targets: {
+        path: '.',
+        editor: '.',
+        browser: template.browser,
+        script: template.script,
+      },
+    };
+
+    nodes = [...nodes, node];
+    syncSmoothNodes(true);
+    scheduleSave();
+    updateStatus(`Added node ${node.name}`);
+  }
+
+  function renameNode(id, value) {
+    nodes = nodes.map((node) => (node.id === id ? { ...node, name: value } : node));
+    scheduleSave();
+  }
+
+  function moveNode(id, direction) {
+    const index = nodes.findIndex((node) => node.id === id);
+    if (index < 0) {
+      return;
+    }
+
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= nodes.length) {
+      return;
+    }
+
+    const next = [...nodes];
+    const [moved] = next.splice(index, 1);
+    next.splice(targetIndex, 0, moved);
+    nodes = next;
+    scheduleSave();
+    updateStatus(`Reordered node ${moved.name}`);
+  }
+
+  function cloneNode(id) {
+    const node = nodes.find((item) => item.id === id);
+    if (!node) {
+      return;
+    }
+
+    const clone = {
+      ...node,
+      id: uniqueNodeId(node.id),
+      name: `${node.name} Copy`,
+      x: node.x + 26,
+      y: node.y + 26,
+      links: [...(node.links ?? [])],
+      targets: { ...(node.targets ?? {}) },
+    };
+
+    nodes = [...nodes, clone];
+    syncSmoothNodes(true);
+    scheduleSave();
+    updateStatus(`Cloned node ${node.name}`);
+  }
+
+  function deleteNode(id) {
+    const removed = nodes.find((node) => node.id === id);
+    if (!removed) {
+      return;
+    }
+
+    nodes = nodes
+      .filter((node) => node.id !== id)
+      .map((node) => ({
+        ...node,
+        links: (node.links ?? []).filter((linkId) => linkId !== id),
+      }));
+
+    syncSmoothNodes(true);
+    scheduleSave();
+    updateStatus(`Deleted node ${removed.name}`);
+  }
+
+  function setTab(tabId) {
+    activeTab = tabId;
   }
 
   onMount(() => {
@@ -304,40 +718,122 @@
       <div class="brand">
         <div class="brand__mark">⟡</div>
         <div>
-          <div class="brand__name">FinNode</div>
-          <div class="brand__tag">desktop contexts, linked</div>
+          <div class="brand__name">FinNode Settings</div>
+          <div class="brand__tag">control center + desktop nodes</div>
         </div>
       </div>
 
-      <div class="rail__section">
-        <div class="section__title">Stealth mode</div>
-        <button class="chip" aria-pressed={stealth} on:click={toggleStealth}>
-          {stealth ? 'Reveal HUD' : 'Hide HUD'}
-        </button>
-        <button class="chip" on:click={toggleDesktop}>
-          {showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}
-        </button>
+      <div class="rail__tabs">
+        {#each settingsTabs as tab}
+          <button class:tab--active={activeTab === tab.id} class="tab" on:click={() => setTab(tab.id)}>{tab.label}</button>
+        {/each}
       </div>
 
-      <div class="rail__section">
-        <div class="section__title">Shortcuts</div>
-        <div class="hint">Alt+S toggles stealth mode from Rust.</div>
-        <div class="hint">Drag nodes to reposition. Links save automatically.</div>
+      <div class="rail__section settings-center">
+        {#if activeTab === 'general'}
+          <div class="section__title">Startup</div>
+          <label class="toggle-row">
+            <span>Open on login</span>
+            <input
+              type="checkbox"
+              checked={settings.general.openOnLogin}
+              on:change={(event) => updateSettings((draft) => {
+                draft.general.openOnLogin = event.currentTarget.checked;
+              })}
+            />
+          </label>
+          <label class="toggle-row">
+            <span>Start minimized to tray</span>
+            <input
+              type="checkbox"
+              checked={settings.general.startMinimizedToTray}
+              on:change={(event) => updateSettings((draft) => {
+                draft.general.startMinimizedToTray = event.currentTarget.checked;
+              })}
+            />
+          </label>
+          <label class="toggle-row">
+            <span>Restore last mode</span>
+            <input
+              type="checkbox"
+              checked={settings.general.restoreLastMode}
+              on:change={(event) => updateSettings((draft) => {
+                draft.general.restoreLastMode = event.currentTarget.checked;
+              })}
+            />
+          </label>
+          <p class="hint">Open-on-login is saved here. System integration can be wired later via autostart plugin.</p>
+        {:else if activeTab === 'appearance'}
+          <div class="section__title">Appearance</div>
+          <label class="toggle-row">
+            <span>Show background grid</span>
+            <input type="checkbox" checked={settings.appearance.showGrid} on:change={(event) => toggleGrid(event.currentTarget.checked)} />
+          </label>
+          <label class="slider-row">
+            <span>Motion scale: {settings.appearance.motionScale.toFixed(2)}</span>
+            <input type="range" min="0.4" max="1.6" step="0.05" value={settings.appearance.motionScale} on:input={(event) => updateMotionScale(event.currentTarget.value)} />
+          </label>
+          <label class="slider-row">
+            <span>Node glow: {settings.appearance.nodeGlow.toFixed(2)}</span>
+            <input type="range" min="0.15" max="1" step="0.05" value={settings.appearance.nodeGlow} on:input={(event) => updateNodeGlow(event.currentTarget.value)} />
+          </label>
+        {:else if activeTab === 'nodes'}
+          <div class="section__title">Desktop Nodes</div>
+          <button class="chip" on:click={toggleDesktop}>{showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}</button>
+          <label class="slider-row">
+            <span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span>
+            <input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={(event) => updateSmoothness(event.currentTarget.value)} />
+          </label>
+
+          <div class="section__title node-manager__title">Node Manager</div>
+          <div class="template-row">
+            <select bind:value={selectedTemplate}>
+              {#each nodeTemplates as template}
+                <option value={template.id}>{template.name}</option>
+              {/each}
+            </select>
+            <button class="chip" on:click={addNodeFromTemplate}>Add Node</button>
+          </div>
+
+          <div class="node-manager">
+            {#each nodes as node, index (node.id)}
+              <div class="node-row">
+                <input value={node.name} on:change={(event) => renameNode(node.id, event.currentTarget.value)} />
+                <div class="node-row__actions">
+                  <button on:click={() => moveNode(node.id, -1)} disabled={index === 0}>Up</button>
+                  <button on:click={() => moveNode(node.id, 1)} disabled={index === nodes.length - 1}>Down</button>
+                  <button on:click={() => cloneNode(node.id)}>Clone</button>
+                  <button class="danger" on:click={() => deleteNode(node.id)}>Delete</button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {:else if activeTab === 'tray'}
+          <div class="section__title">Tray Quick Actions</div>
+          <button class="chip" on:click={openSettingsFromTray}>Open Settings</button>
+          <button class="chip" on:click={toggleStealth}>{stealth ? 'Disable Stealth' : 'Toggle Stealth'}</button>
+          <button class="chip" on:click={toggleDesktop}>{showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}</button>
+          <button class="chip" on:click={hideToTray}>Hide To Tray</button>
+          <button class="chip chip--danger" on:click={exitApp}>Exit</button>
+        {:else}
+          <div class="section__title">Shortcuts</div>
+          <div class="hint">Stealth Toggle: {settings.shortcuts.toggleStealth}</div>
+          <div class="hint">Tray click: Open Settings</div>
+          <div class="hint">Tip: use Node Manager for quick edit and reorder.</div>
+        {/if}
       </div>
 
       <div class="rail__section meter">
-        <div class="section__title">Resource sharks</div>
-        <div class="sharks">
-          {#each sharkWidths as width, index}
-            <span class={`shark shark--${index % 3}`} style={`width:${width}px;animation-delay:${index * 0.35}s`}></span>
-          {/each}
+        <div class="section__title">Activity</div>
+        <div class="activity-list">
+          {#if activityLog.length === 0}
+            <div class="hint">No activity yet.</div>
+          {:else}
+            {#each activityLog as item (item.id)}
+              <div class="activity-item">{item.text}</div>
+            {/each}
+          {/if}
         </div>
-      </div>
-
-      <div class="rail__section">
-        <div class="section__title">Application</div>
-        <button class="chip" on:click={hideToTray}>Hide to Tray</button>
-        <button class="chip chip--danger" on:click={exitApp}>Exit</button>
       </div>
     </aside>
 
@@ -349,11 +845,11 @@
       </svg>
 
       <div class="node-layer" bind:this={nodeLayer}>
-        {#each nodes as node (node.id)}
+        {#each renderNodes as node (node.id)}
           <article
             class="node"
             use:nodeRef={node.id}
-            style={`left:${node.x}px;top:${node.y}px;`}
+            style={`left:${node.renderX}px;top:${node.renderY}px;`}
             on:pointerdown={(event) => beginDrag(event, node.id)}
           >
             <div class="node__surface">
@@ -398,6 +894,9 @@
     --accent-2: #9dffb9;
     --danger: #ff8fa3;
     --shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+    --motion-scale: 1;
+    --node-glow: 0.45;
+    --grid-opacity: 0.4;
     font-family: 'Space Grotesk', sans-serif;
   }
 
@@ -426,7 +925,7 @@
     background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
     background-size: 42px 42px;
     mask-image: radial-gradient(circle at center, black 45%, transparent 82%);
-    opacity: 0.4;
+    opacity: var(--grid-opacity);
   }
 
   :global(body.is-stealth) .rail {
@@ -445,7 +944,7 @@
 
   .hud-shell {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 420px 1fr;
     width: 100%;
     height: 100%;
   }
@@ -516,6 +1015,136 @@
     background: rgba(7, 12, 20, 0.42);
   }
 
+  .rail__tabs {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .tab {
+    border: 1px solid rgba(124, 244, 255, 0.2);
+    background: rgba(8, 15, 26, 0.6);
+    color: var(--muted);
+    border-radius: 12px;
+    padding: 10px 8px;
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+  }
+
+  .tab--active {
+    color: var(--text);
+    border-color: rgba(124, 244, 255, 0.45);
+    background: rgba(16, 30, 45, 0.88);
+    box-shadow: 0 0 18px rgba(124, 244, 255, 0.16);
+  }
+
+  .settings-center {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 320px;
+  }
+
+  .toggle-row,
+  .slider-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    color: rgba(233, 248, 255, 0.92);
+    font-size: 0.88rem;
+    margin-top: 8px;
+  }
+
+  .toggle-row input {
+    accent-color: #7cf4ff;
+  }
+
+  .slider-row input[type='range'] {
+    width: 46%;
+  }
+
+  .template-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .template-row select,
+  .node-row input {
+    width: 100%;
+    border: 1px solid rgba(124, 244, 255, 0.22);
+    background: rgba(8, 15, 26, 0.8);
+    color: var(--text);
+    border-radius: 12px;
+    padding: 9px 10px;
+    font: inherit;
+  }
+
+  .node-manager {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 230px;
+    overflow: auto;
+    margin-top: 8px;
+    padding-right: 4px;
+  }
+
+  .node-manager__title {
+    margin-top: 14px;
+  }
+
+  .node-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid rgba(124, 244, 255, 0.12);
+    border-radius: 12px;
+    background: rgba(7, 12, 20, 0.5);
+  }
+
+  .node-row__actions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .node-row__actions button {
+    border: 1px solid rgba(124, 244, 255, 0.2);
+    background: rgba(8, 15, 26, 0.78);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 6px 8px;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+
+  .node-row__actions .danger {
+    border-color: rgba(255, 143, 163, 0.4);
+    color: #ffd9e1;
+  }
+
+  .activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 130px;
+    overflow: auto;
+  }
+
+  .activity-item {
+    font-size: 0.76rem;
+    line-height: 1.35;
+    color: rgba(233, 248, 255, 0.8);
+    border-bottom: 1px dashed rgba(124, 244, 255, 0.16);
+    padding-bottom: 6px;
+  }
+
   .section__title {
     margin-bottom: 10px;
     text-transform: uppercase;
@@ -555,11 +1184,11 @@
   .stage {
     position: relative;
     overflow: hidden;
-    transition: opacity 220ms ease, transform 220ms ease;
+    transition: opacity calc(220ms * var(--motion-scale)) ease, transform calc(220ms * var(--motion-scale)) ease;
   }
 
   .stage--hidden {
-    opacity: 0.08;
+    opacity: 0;
     transform: scale(0.98);
     pointer-events: none;
   }
@@ -594,7 +1223,7 @@
     cursor: grab;
     user-select: none;
     will-change: left, top;
-    transition: left 120ms cubic-bezier(0.22, 0.61, 0.36, 1), top 120ms cubic-bezier(0.22, 0.61, 0.36, 1);
+    transition: left calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1), top calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1);
   }
 
   .node__surface {
@@ -606,10 +1235,10 @@
     border-radius: 26px;
     background: linear-gradient(180deg, rgba(18, 27, 41, 0.94), rgba(10, 15, 24, 0.82));
     border: 1px solid rgba(124, 244, 255, 0.2);
-    box-shadow: var(--shadow), 0 0 22px rgba(124, 244, 255, 0.08) inset;
+    box-shadow: var(--shadow), 0 0 calc(30px * var(--node-glow)) rgba(124, 244, 255, calc(0.2 * var(--node-glow))) inset;
     backdrop-filter: blur(20px) saturate(150%);
-    animation: drift 18s ease-in-out infinite;
-    transition: transform 140ms ease, box-shadow 140ms ease;
+    animation: drift calc(18s * var(--motion-scale)) ease-in-out infinite;
+    transition: transform calc(140ms * var(--motion-scale)) ease, box-shadow calc(140ms * var(--motion-scale)) ease;
     will-change: transform;
   }
 
@@ -618,11 +1247,11 @@
     position: absolute;
     inset: 0;
     border-radius: 26px;
-    box-shadow: 0 0 24px rgba(124, 244, 255, 0.14);
+    box-shadow: 0 0 calc(24px * var(--node-glow)) rgba(124, 244, 255, calc(0.14 * var(--node-glow)));
     pointer-events: none;
   }
 
-  .node.is-dragging {
+  :global(.node.is-dragging) {
     cursor: grabbing;
     transition: none;
   }
@@ -699,29 +1328,6 @@
     margin-top: auto;
   }
 
-  .sharks {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding-top: 8px;
-  }
-
-  .shark {
-    height: 10px;
-    border-radius: 999px;
-    background: linear-gradient(90deg, rgba(124, 244, 255, 0.18), rgba(124, 244, 255, 0.92), rgba(157, 255, 185, 0.88));
-    box-shadow: 0 0 18px rgba(124, 244, 255, 0.18);
-    animation: swim 4.8s ease-in-out infinite;
-  }
-
-  .shark--1 {
-    opacity: 0.72;
-  }
-
-  .shark--2 {
-    opacity: 0.48;
-  }
-
   .hint {
     line-height: 1.5;
     margin-top: 6px;
@@ -751,15 +1357,6 @@
     50% {
       opacity: 1;
       transform: scale(1.08);
-    }
-  }
-
-  @keyframes swim {
-    0%, 100% {
-      transform: translateX(0);
-    }
-    50% {
-      transform: translateX(18px);
     }
   }
 

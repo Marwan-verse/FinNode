@@ -13,7 +13,7 @@ FinNode is a Tauri HUD for desktop project nodes.
 
 1. Install dependencies with `npm install`.
 2. Start the web UI with `npm run dev`.
-3. Start the desktop shell with `npm run dev:desktop`.
+3. Start the desktop shell with `npm run dev:desktop` (auto-installs missing apt dependencies on Linux when needed).
 
 ## Build
 

@@ -9,6 +9,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+mode="${1:-build}"
+
+if [[ "$mode" != "build" && "$mode" != "dev" ]]; then
+  echo "[FinNode] Unknown mode: $mode"
+  echo "[FinNode] Use: build (default) or dev"
+  exit 1
+fi
+
 run_privileged() {
   if command -v sudo >/dev/null 2>&1; then
     sudo "$@"
@@ -148,6 +156,12 @@ fi
 
 echo "[FinNode] Installing npm dependencies..."
 npm install --include=dev
+
+if [[ "$mode" == "dev" ]]; then
+  echo "[FinNode] Starting desktop app in dev mode..."
+  npx tauri dev
+  exit 0
+fi
 
 echo "[FinNode] Building executable bundle..."
 npx tauri build

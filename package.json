@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:desktop": "tauri dev",
+    "dev:desktop": "bash ./scripts/make-executable.sh dev",
     "build:web": "vite build",
     "build:exe": "bash ./scripts/make-executable.sh",
     "build:windows": "bash ./scripts/make-windows-executable.sh",
