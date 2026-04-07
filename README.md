@@ -26,7 +26,9 @@ FinNode is a Tauri HUD for desktop project nodes.
 
 ### Linux desktop prerequisites
 
-For `npm run build:exe` on Linux, install Tauri system dependencies first:
+`npm run build:exe` now attempts to install missing Linux dependencies automatically on apt-based systems.
+
+If you want to install them manually (or if your distro is not apt-based), use:
 
 ```bash
 sudo apt-get update
@@ -44,6 +46,8 @@ sudo apt-get install -y libwebkit2gtk-4.0-dev
 # Ubuntu 24.04+
 sudo apt-get install -y libwebkit2gtk-4.1-dev
 ```
+
+`npm run build:windows` also auto-installs `gcc-mingw-w64-x86-64` on apt-based Linux when missing.
 
 ## Notes
 
