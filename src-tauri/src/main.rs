@@ -10,7 +10,10 @@ use std::{
   sync::{Arc, Mutex},
   thread,
 };
-use tauri::{AppHandle, GlobalShortcutManager, Manager, State, Window};
+use tauri::{
+  AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
+  SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LaunchTargets {
@@ -93,9 +96,69 @@ fn set_stealth_mode(app: AppHandle, window: Window, state: State<'_, AppState>, 
   update_stealth_mode(&app, &window, &state, enabled)
 }
 
+#[tauri::command]
+fn hide_main_window(window: Window) -> Result<(), String> {
+  window.hide().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+  let window = app.get_window("main").ok_or_else(|| "main window not found".to_string())?;
+  window.show().map_err(|err| err.to_string())?;
+  window.unminimize().map_err(|err| err.to_string())?;
+  window.set_focus().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+  app.exit(0);
+}
+
+fn build_system_tray() -> SystemTray {
+  let open_item = CustomMenuItem::new("open", "Open FinNode");
+  let hide_item = CustomMenuItem::new("hide", "Hide");
+  let exit_item = CustomMenuItem::new("exit", "Exit");
+  let tray_menu = SystemTrayMenu::new()
+    .add_item(open_item)
+    .add_item(hide_item)
+    .add_native_item(SystemTrayMenuItem::Separator)
+    .add_item(exit_item);
+
+  SystemTray::new().with_menu(tray_menu)
+}
+
 fn main() {
   tauri::Builder::default()
+    .system_tray(build_system_tray())
     .manage(create_state())
+    .on_system_tray_event(|app, event| match event {
+      SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
+        "open" => {
+          let _ = show_main_window(app.clone());
+        }
+        "hide" => {
+          if let Some(window) = app.get_window("main") {
+            let _ = window.hide();
+          }
+        }
+        "exit" => app.exit(0),
+        _ => {}
+      },
+      SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
+        let _ = show_main_window(app.clone());
+      }
+      _ => {}
+    })
+    .on_window_event(|event| {
+      if event.window().label() != "main" {
+        return;
+      }
+
+      if let WindowEvent::CloseRequested { api, .. } = event.event() {
+        api.prevent_close();
+        let _ = event.window().hide();
+      }
+    })
     .setup(|app| {
       let window = app.get_window("main").expect("main window");
       let state = app.state::<AppState>();
@@ -109,7 +172,15 @@ fn main() {
       spawn_layout_watcher(app.handle(), state.layout_path.clone());
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![load_layout, save_layout, launch_node, set_stealth_mode])
+    .invoke_handler(tauri::generate_handler![
+      load_layout,
+      save_layout,
+      launch_node,
+      set_stealth_mode,
+      hide_main_window,
+      show_main_window,
+      exit_app
+    ])
     .run(tauri::generate_context!())
     .expect("error while running FinNode");
 }

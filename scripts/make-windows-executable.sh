@@ -59,6 +59,11 @@ npm install --include=dev
 echo "[FinNode] Building web assets..."
 npm run build:web
 
+if [ -f src-tauri/icons/icon.png ] && command -v convert >/dev/null 2>&1; then
+  echo "[FinNode] Syncing Windows icon from icon.png..."
+  convert src-tauri/icons/icon.png -define icon:auto-resize=16,24,32,48,64,128,256 src-tauri/icons/icon.ico
+fi
+
 echo "[FinNode] Web assets built. Starting Rust Windows compile (this can take several minutes on first run)..."
 
 echo "[FinNode] Building Windows executable..."

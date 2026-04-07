@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
 
@@ -7,9 +7,12 @@
   let stealth = false;
   let draggingId = null;
   let dragOffset = { x: 0, y: 0 };
+  let pendingPointer = null;
+  let dragFrame = null;
   let saveTimer = null;
   let statusText = 'Loading layout...';
   let fatalError = '';
+  let showDesktop = false;
 
   let nodeLayer;
   let viewBox = '0 0 1 1';
@@ -60,7 +63,7 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
 
-    onDestroy(() => {
+    return () => {
       unlistenStealth();
       unlistenLayout();
       window.removeEventListener('resize', onResize);
@@ -69,7 +72,7 @@
       if (saveTimer) {
         window.clearTimeout(saveTimer);
       }
-    });
+    };
   }
 
   async function loadLayout() {
@@ -142,23 +145,70 @@
       return;
     }
 
-    const node = nodes.find((item) => item.id === draggingId);
-    if (!node) {
+    pendingPointer = {
+      x: event.clientX,
+      y: event.clientY,
+    };
+
+    if (dragFrame !== null) {
       return;
     }
 
-    const layerRect = nodeLayer.getBoundingClientRect();
-    node.x = event.clientX - layerRect.left - dragOffset.x;
-    node.y = event.clientY - layerRect.top - dragOffset.y;
-    nodes = [...nodes];
+    dragFrame = window.requestAnimationFrame(() => {
+      dragFrame = null;
+
+      if (!pendingPointer || !draggingId || !nodeLayer) {
+        return;
+      }
+
+      const pointer = pendingPointer;
+      pendingPointer = null;
+
+      const node = nodes.find((item) => item.id === draggingId);
+      if (!node) {
+        return;
+      }
+
+      const layerRect = nodeLayer.getBoundingClientRect();
+      node.x = pointer.x - layerRect.left - dragOffset.x;
+      node.y = pointer.y - layerRect.top - dragOffset.y;
+      nodes = [...nodes];
+      queueRenderConnections();
+      scheduleSave();
+    });
+  }
+
+  async function hideToTray() {
+    try {
+      await invoke('hide_main_window');
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function exitApp() {
+    try {
+      await invoke('exit_app');
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function toggleDesktop() {
+    showDesktop = !showDesktop;
     queueRenderConnections();
-    scheduleSave();
   }
 
   function onPointerUp() {
     if (!draggingId) {
       return;
     }
+
+    if (dragFrame !== null) {
+      window.cancelAnimationFrame(dragFrame);
+      dragFrame = null;
+    }
+    pendingPointer = null;
 
     const element = nodeElements.get(draggingId);
     if (element) {
@@ -217,9 +267,25 @@
   }
 
   onMount(() => {
-    void bootstrap().catch((error) => {
-      fatalError = error?.stack ?? error?.message ?? String(error);
-    });
+    let disposed = false;
+    let cleanup = () => {};
+
+    void bootstrap()
+      .then((nextCleanup) => {
+        if (disposed) {
+          nextCleanup();
+          return;
+        }
+        cleanup = nextCleanup;
+      })
+      .catch((error) => {
+        fatalError = error?.stack ?? error?.message ?? String(error);
+      });
+
+    return () => {
+      disposed = true;
+      cleanup();
+    };
   });
 </script>
 
@@ -248,6 +314,9 @@
         <button class="chip" aria-pressed={stealth} on:click={toggleStealth}>
           {stealth ? 'Reveal HUD' : 'Hide HUD'}
         </button>
+        <button class="chip" on:click={toggleDesktop}>
+          {showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}
+        </button>
       </div>
 
       <div class="rail__section">
@@ -264,9 +333,15 @@
           {/each}
         </div>
       </div>
+
+      <div class="rail__section">
+        <div class="section__title">Application</div>
+        <button class="chip" on:click={hideToTray}>Hide to Tray</button>
+        <button class="chip chip--danger" on:click={exitApp}>Exit</button>
+      </div>
     </aside>
 
-    <main class="stage">
+    <main class="stage" class:stage--hidden={!showDesktop}>
       <svg class="links" {viewBox}>
         {#each links as d}
           <path class="link" {d}></path>
@@ -467,9 +542,26 @@
     box-shadow: 0 0 18px rgba(124, 244, 255, 0.16);
   }
 
+  .chip {
+    width: 100%;
+    margin-top: 10px;
+  }
+
+  .chip--danger {
+    border-color: rgba(255, 143, 163, 0.4);
+    color: #ffd9e1;
+  }
+
   .stage {
     position: relative;
     overflow: hidden;
+    transition: opacity 220ms ease, transform 220ms ease;
+  }
+
+  .stage--hidden {
+    opacity: 0.08;
+    transform: scale(0.98);
+    pointer-events: none;
   }
 
   .links,
@@ -502,6 +594,7 @@
     cursor: grab;
     user-select: none;
     will-change: left, top;
+    transition: left 120ms cubic-bezier(0.22, 0.61, 0.36, 1), top 120ms cubic-bezier(0.22, 0.61, 0.36, 1);
   }
 
   .node__surface {
@@ -531,6 +624,7 @@
 
   .node.is-dragging {
     cursor: grabbing;
+    transition: none;
   }
 
   :global(.node.is-dragging) .node__surface {

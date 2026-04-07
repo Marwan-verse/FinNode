@@ -28,12 +28,12 @@
     "windows": [
       {
         "title": "FinNode",
-        "width": 1440,
-        "height": 900,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
+        "width": 460,
+        "height": 720,
+        "transparent": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
         "resizable": true,
         "visible": true,
         "center": true
