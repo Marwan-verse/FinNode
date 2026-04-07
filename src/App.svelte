@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
 
@@ -60,7 +60,7 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
 
-    onDestroy(() => {
+    return () => {
       unlistenStealth();
       unlistenLayout();
       window.removeEventListener('resize', onResize);
@@ -69,7 +69,7 @@
       if (saveTimer) {
         window.clearTimeout(saveTimer);
       }
-    });
+    };
   }
 
   async function loadLayout() {
@@ -217,9 +217,25 @@
   }
 
   onMount(() => {
-    void bootstrap().catch((error) => {
-      fatalError = error?.stack ?? error?.message ?? String(error);
-    });
+    let disposed = false;
+    let cleanup = () => {};
+
+    void bootstrap()
+      .then((nextCleanup) => {
+        if (disposed) {
+          nextCleanup();
+          return;
+        }
+        cleanup = nextCleanup;
+      })
+      .catch((error) => {
+        fatalError = error?.stack ?? error?.message ?? String(error);
+      });
+
+    return () => {
+      disposed = true;
+      cleanup();
+    };
   });
 </script>
 
