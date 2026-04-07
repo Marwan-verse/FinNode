@@ -188,7 +188,7 @@ fn default_layout() -> ProjectLayout {
           path: Some(".".into()),
           editor: Some(".".into()),
           browser: Some("https://example.com".into()),
-          script: Some("npm run dev".into()),
+          script: Some("npm run build:web".into()),
         },
       },
       ProjectNode {

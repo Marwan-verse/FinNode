@@ -9,14 +9,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Load Cargo path first when rustup is already installed.
+if [ -s "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "[FinNode] Rust toolchain not found. Installing rustup locally..."
   curl https://sh.rustup.rs -sSf | sh -s -- -y
   # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
 fi
-
-source "$HOME/.cargo/env"
 
 if ! rustup target list --installed | grep -qx 'x86_64-pc-windows-gnu'; then
   echo "[FinNode] Installing Windows Rust target..."
@@ -54,6 +58,8 @@ npm install
 
 echo "[FinNode] Building web assets..."
 npm run build:web
+
+echo "[FinNode] Web assets built. Starting Rust Windows compile (this can take several minutes on first run)..."
 
 echo "[FinNode] Building Windows executable..."
 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
