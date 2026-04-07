@@ -33,6 +33,22 @@ EOF
   exit 1
 fi
 
+if ! command -v npm >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.nvm/nvm.sh"
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  cat <<'EOF'
+[FinNode] npm is not installed.
+Install Node.js/npm, then re-run this script.
+If you use nvm:
+  source "$HOME/.nvm/nvm.sh"
+  nvm install --lts
+EOF
+  exit 1
+fi
+
 echo "[FinNode] Installing npm dependencies..."
 npm install
 
