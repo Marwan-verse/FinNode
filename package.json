@@ -1,0 +1,22 @@
+{
+  "name": "finnode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:desktop": "tauri dev",
+    "build:web": "vite build",
+    "build:exe": "tauri build",
+    "build:windows": "bash ./scripts/make-windows-executable.sh",
+    "make": "tauri build",
+    "make:windows": "bash ./scripts/make-windows-executable.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^1.6.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.3",
+    "vite": "^5.4.11"
+  }
+}
