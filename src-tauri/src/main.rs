@@ -481,12 +481,13 @@ fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<()
     use std::sync::mpsc;
 
     let window = window.clone();
+    let window_for_thread = window.clone();
     let regions = regions.to_vec();
     let (tx, rx) = mpsc::channel();
 
     window.run_on_main_thread(move || {
         let result = (|| -> Result<(), String> {
-            let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+            let hwnd = window_for_thread.hwnd().map_err(|e| e.to_string())?;
             let raw = hwnd.0 as isize;
             let valid: Vec<HitRegion> = regions
                 .into_iter()
@@ -530,11 +531,12 @@ fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
     use std::sync::mpsc;
 
     let window = window.clone();
+    let window_for_thread = window.clone();
     let (tx, rx) = mpsc::channel();
 
     window.run_on_main_thread(move || {
         let result = (|| -> Result<(), String> {
-            let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+            let hwnd = window_for_thread.hwnd().map_err(|e| e.to_string())?;
             let raw = hwnd.0 as isize;
             unsafe {
                 if SetWindowRgn(raw, 0, 1) == 0 {
