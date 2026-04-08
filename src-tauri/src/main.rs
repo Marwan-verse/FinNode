@@ -26,6 +26,10 @@ extern "system" {
     fn SetWindowPos(hwnd: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
     fn SetWindowLongW(hwnd: isize, index: i32, new_long: i32) -> i32;
+    fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
+    fn CombineRgn(dest: isize, src1: isize, src2: isize, mode: i32) -> i32;
+    fn DeleteObject(obj: isize) -> i32;
+    fn SetWindowRgn(hwnd: isize, hrgn: isize, redraw: i32) -> i32;
 }
 
 #[cfg(target_os = "windows")]
@@ -42,6 +46,8 @@ const WS_EX_NOACTIVATE: i32 = 0x08000000u32 as i32;
 const WS_EX_TOOLWINDOW: i32 = 0x00000080;
 #[cfg(target_os = "windows")]
 const WS_EX_APPWINDOW: i32 = 0x00040000;
+#[cfg(target_os = "windows")]
+const RGN_OR: i32 = 2;
 
 // ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -57,6 +63,14 @@ struct LaunchTargets {
     editor: Option<String>,
     browser: Option<String>,
     script: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HitRegion {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +325,34 @@ fn set_desktop_click_through(app: AppHandle, state: State<'_, AppState>, enabled
 }
 
 #[tauri::command]
+fn set_desktop_hit_regions(app: AppHandle, regions: Vec<HitRegion>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let window = app.get_window("desktop").ok_or("desktop window not found")?;
+        apply_window_hit_regions(&window, &regions)?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, regions);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_desktop_hit_regions(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let window = app.get_window("desktop").ok_or("desktop window not found")?;
+        clear_window_hit_regions(&window)?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn hide_main_window(window: Window) -> Result<(), String> {
     window.hide().map_err(|e| e.to_string())
 }
@@ -359,17 +401,38 @@ fn setup_desktop_widget(window: &Window) -> Result<(), String> {
         SetWindowLongW(raw, GWL_EXSTYLE, new_ex);
     }
 
-    // Size to primary monitor
-    if let Ok(Some(monitor)) = window.primary_monitor() {
-        let size = monitor.size();
-        let pos = monitor.position();
-        unsafe {
-            SetWindowPos(
-                raw, HWND_BOTTOM,
-                pos.x as i32, pos.y as i32,
-                size.width as i32, size.height as i32,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+    // Size to Windows work area so the taskbar stays visible.
+    let mut applied = false;
+    unsafe {
+        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut Rect, 0) != 0 {
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            if width > 0 && height > 0 {
+                SetWindowPos(
+                    raw, HWND_BOTTOM,
+                    rect.left, rect.top,
+                    width, height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+                applied = true;
+            }
+        }
+    }
+
+    // Fallback to primary monitor if work area is unavailable.
+    if !applied {
+        if let Ok(Some(monitor)) = window.primary_monitor() {
+            let size = monitor.size();
+            let pos = monitor.position();
+            unsafe {
+                SetWindowPos(
+                    raw, HWND_BOTTOM,
+                    pos.x as i32, pos.y as i32,
+                    size.width as i32, size.height as i32,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
         }
     }
 
@@ -382,6 +445,54 @@ fn set_window_bottom(window: &Window) -> Result<(), String> {
     let raw = hwnd.0 as isize;
     unsafe {
         SetWindowPos(raw, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOACTIVATE | 0x0001 | 0x0002);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    let valid: Vec<&HitRegion> = regions
+        .iter()
+        .filter(|r| r.right > r.left && r.bottom > r.top)
+        .collect();
+
+    unsafe {
+        let mut region = if let Some(r) = valid.first() {
+            CreateRectRgn(r.left, r.top, r.right, r.bottom)
+        } else {
+            CreateRectRgn(0, 0, 0, 0)
+        };
+        if region == 0 {
+            return Err("CreateRectRgn failed".into());
+        }
+
+        for r in valid.iter().skip(1) {
+            let next = CreateRectRgn(r.left, r.top, r.right, r.bottom);
+            if next == 0 {
+                continue;
+            }
+            CombineRgn(region, region, next, RGN_OR);
+            DeleteObject(next);
+        }
+
+        if SetWindowRgn(raw, region, 1) == 0 {
+            return Err("SetWindowRgn failed".into());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    unsafe {
+        if SetWindowRgn(raw, 0, 1) == 0 {
+            return Err("SetWindowRgn failed".into());
+        }
     }
     Ok(())
 }
@@ -428,7 +539,15 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
 }
 
 fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), String> {
-    window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())
+    #[cfg(target_os = "windows")]
+    {
+        let _ = enabled;
+        return window.set_ignore_cursor_events(false).map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())
+    }
 }
 
 fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
@@ -678,7 +797,7 @@ fn build_system_tray() -> SystemTray {
         .add_item(CustomMenuItem::new("open-settings", "Open Settings"))
         .add_item(CustomMenuItem::new("toggle-stealth", "Toggle Stealth"))
         .add_item(CustomMenuItem::new("toggle-desktop", "Show/Hide Desktop Nodes"))
-        .add_item(CustomMenuItem::new("toggle-click-through", "Toggle Click-Through"))
+        .add_item(CustomMenuItem::new("toggle-click-through", "Toggle Background Click-Through"))
         .add_native_item(SystemTrayMenuItem::Separator)
         .add_item(CustomMenuItem::new("exit", "Exit"));
     SystemTray::new().with_menu(menu)
@@ -848,6 +967,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_layout, save_layout, launch_node, run_node_macro,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
+            set_desktop_hit_regions, clear_desktop_hit_regions,
             hide_main_window, show_main_window, show_settings_view, exit_app,
             pin_desktop_bottom,
             list_workspaces, create_workspace, switch_workspace, delete_workspace, rename_workspace,

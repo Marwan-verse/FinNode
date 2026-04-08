@@ -24,22 +24,13 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.18), transparent 28%),
-    radial-gradient(circle at 80% 10%, rgba(89, 255, 197, 0.16), transparent 24%),
-    linear-gradient(135deg, #02040a 0%, #07111d 48%, #02040a 100%);
+  background: var(--bg);
   color: var(--text);
 }
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 42px 42px;
-  mask-image: radial-gradient(circle at center, black 45%, transparent 82%);
-  opacity: 0.4;
+html.desktop-overlay-window,
+body.desktop-mode {
+  background: transparent;
 }
 
 body.is-stealth .rail {
@@ -82,10 +73,8 @@ body.is-stealth .ghost-fin {
   flex-direction: column;
   gap: 20px;
   padding: 24px;
-  background: linear-gradient(180deg, rgba(12, 18, 29, 0.92), rgba(8, 12, 19, 0.48));
+  background: var(--panel-strong);
   border-right: 1px solid rgba(124, 244, 255, 0.16);
-  backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04);
   transition: transform 260ms ease, opacity 260ms ease;
 }
 
