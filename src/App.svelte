@@ -743,7 +743,7 @@
   :global(body.is-stealth) .ghost-fin { opacity:1; }
   :global(#app) { width:100%;height:100%; }
 
-  .settings-app { position:relative;display:flex;width:100%;height:100%; }
+  .settings-app { position:relative;display:flex;width:100%;height:100%;min-height:100%; }
   .desktop-overlay { position:relative;width:100%;height:100%;background:transparent;pointer-events:none; }
   .settings-head { display:flex;justify-content:space-between;align-items:flex-start;gap:12px; }
   .window-controls { display:flex;gap:8px; }
@@ -752,7 +752,7 @@
   .window-controls__btn--danger { border-color:rgba(255,143,163,0.4);color:#ffd9e1; }
   .ghost-fin { border:0;padding:0;position:fixed;top:0;left:0;width:4px;height:100vh;background:linear-gradient(180deg,transparent,rgba(124,244,255,0.8),transparent);box-shadow:0 0 18px rgba(124,244,255,0.85);opacity:0;transition:opacity 180ms ease;z-index:30; }
   .rail { position:relative;display:flex;flex-direction:column;gap:14px;padding:20px;background:var(--panel-strong);border-right:1px solid rgba(124,244,255,0.2);transition:transform 260ms ease,opacity 260ms ease; }
-  .rail--settings { width:100%;border-right:0;overflow-y:auto; }
+  .rail--settings { width:100%;border-right:0;overflow-y:auto;flex:1;min-height:0;height:100%; }
   .brand { display:flex;gap:14px;align-items:center; }
   .brand__mark { width:48px;height:48px;display:grid;place-items:center;border-radius:16px;background:rgba(7,14,24,0.9);box-shadow:0 0 18px rgba(0,0,0,0.4); }
   .brand__logo { width:28px;height:28px;object-fit:contain;filter:drop-shadow(0 0 8px rgba(124,244,255,0.3)); }
