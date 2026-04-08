@@ -97,8 +97,8 @@ fn launch_node(node: ProjectNode, action: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_stealth_mode(app: AppHandle, window: Window, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  update_stealth_mode(&app, &window, &state, enabled)
+fn set_stealth_mode(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+  update_stealth_mode(&app, &state, enabled)
 }
 
 #[tauri::command]
@@ -120,8 +120,8 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_settings_view(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-  apply_desktop_mode(&app, &state, false)?;
+fn show_settings_view(app: AppHandle, _state: State<'_, AppState>) -> Result<(), String> {
+  show_main_window(app.clone())?;
   let _ = app.emit_all("open-settings-tab", "general");
   Ok(())
 }
@@ -135,24 +135,21 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
     *desktop_visible = visible;
   }
 
-  let window = app
-    .get_window("main")
-    .ok_or_else(|| "main window not found".to_string())?;
-
-  window.show().map_err(|err| err.to_string())?;
+  let desktop = app
+    .get_window("desktop")
+    .ok_or_else(|| "desktop window not found".to_string())?;
 
   if visible {
-    let _ = window.set_decorations(false);
-    let _ = window.set_skip_taskbar(true);
-    let _ = window.set_always_on_top(true);
-    window.set_fullscreen(true).map_err(|err| err.to_string())?;
+    let _ = desktop.set_decorations(false);
+    let _ = desktop.set_skip_taskbar(true);
+    let _ = desktop.set_always_on_top(true);
+    let _ = desktop.set_resizable(false);
+    desktop.show().map_err(|err| err.to_string())?;
+    let _ = desktop.unminimize();
+    desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
   } else {
-    window.set_fullscreen(false).map_err(|err| err.to_string())?;
-    let _ = window.set_always_on_top(false);
-    let _ = window.set_skip_taskbar(false);
-    let _ = window.set_decorations(true);
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    let _ = desktop.set_fullscreen(false);
+    let _ = desktop.hide();
   }
 
   let _ = app.emit_all("desktop-visibility-changed", visible);
@@ -207,18 +204,13 @@ fn main() {
             }
           };
 
-          if let Some(window) = app.get_window("main") {
-            let _ = apply_stealth_mode(&window, next_enabled);
-          }
-
-          let _ = app.emit_all("stealth-changed", next_enabled);
+          let _ = update_stealth_mode(&app, &state, next_enabled);
         }
         "toggle-desktop" => {
           let state = app.state::<AppState>();
           let next_visible = match state.desktop_visible.lock() {
-            Ok(mut desktop_visible) => {
-              *desktop_visible = !*desktop_visible;
-              *desktop_visible
+            Ok(desktop_visible) => {
+              !*desktop_visible
             }
             Err(_) => {
               eprintln!("failed to toggle desktop visibility from tray: lock poisoned");
@@ -238,23 +230,33 @@ fn main() {
       _ => {}
     })
     .on_window_event(|event| {
-      if event.window().label() != "main" {
-        return;
-      }
-
       if let WindowEvent::CloseRequested { api, .. } = event.event() {
         api.prevent_close();
-        let _ = event.window().hide();
+        if event.window().label() == "desktop" {
+          let app = event.window().app_handle();
+          let state = app.state::<AppState>();
+          let _ = apply_desktop_mode(&app, &state, false);
+          return;
+        }
+
+        if event.window().label() == "main" {
+          let _ = event.window().hide();
+        }
       }
     })
     .setup(|app| {
       let window = app.get_window("main").expect("main window");
+      if let Some(desktop_window) = app.get_window("desktop") {
+        let _ = desktop_window.hide();
+      }
+
+      let _ = window.set_resizable(false);
       let state = app.state::<AppState>();
       let layout = read_layout(&state.layout_path).unwrap_or_else(|_| default_layout());
       let _ = write_layout(&state.layout_path, &layout);
       *state.cached_layout.lock().expect("cache") = layout;
 
-      if let Err(error) = register_shortcuts(app.handle(), window.clone()) {
+      if let Err(error) = register_shortcuts(app.handle()) {
         eprintln!("failed to register global shortcut: {error}");
       }
       spawn_layout_watcher(app.handle(), state.layout_path.clone());
@@ -312,7 +314,7 @@ fn create_state() -> AppState {
   }
 }
 
-fn register_shortcuts(app: AppHandle, window: Window) -> Result<(), String> {
+fn register_shortcuts(app: AppHandle) -> Result<(), String> {
   let shortcut = "Alt+S";
   app.global_shortcut_manager()
     .register(shortcut, move || {
@@ -328,12 +330,10 @@ fn register_shortcuts(app: AppHandle, window: Window) -> Result<(), String> {
         }
       };
 
-      if let Err(error) = apply_stealth_mode(&window, next_enabled) {
+      if let Err(error) = update_stealth_mode(&app, &state, next_enabled) {
         eprintln!("failed to update stealth mode: {error}");
         return;
       }
-
-      let _ = app.emit_all("stealth-changed", next_enabled);
     })
     .map_err(|err| err.to_string())
 }
@@ -428,24 +428,38 @@ fn default_layout() -> ProjectLayout {
   }
 }
 
-fn update_stealth_mode(app: &AppHandle, window: &Window, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
+fn update_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
   {
     let mut stealth = state.stealth.lock().map_err(|_| "stealth lock poisoned".to_string())?;
     *stealth = enabled;
   }
 
-  apply_stealth_mode(window, enabled)?;
+  apply_stealth_mode(app, state, enabled)?;
   let _ = app.emit_all("stealth-changed", enabled);
   Ok(())
 }
 
-fn apply_stealth_mode(window: &Window, enabled: bool) -> Result<(), String> {
+fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
+  let main = app.get_window("main").ok_or_else(|| "main window not found".to_string())?;
+  let desktop = app.get_window("desktop").ok_or_else(|| "desktop window not found".to_string())?;
+
   if enabled {
-    window.hide().map_err(|err| err.to_string())?;
+    let _ = main.hide();
+    let _ = desktop.hide();
   } else {
-    window.show().map_err(|err| err.to_string())?;
-    let _ = window.unminimize();
-    window.set_focus().map_err(|err| err.to_string())?;
+    main.show().map_err(|err| err.to_string())?;
+    let _ = main.unminimize();
+    main.set_focus().map_err(|err| err.to_string())?;
+
+    let desktop_visible = state
+      .desktop_visible
+      .lock()
+      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
+    if *desktop_visible {
+      desktop.show().map_err(|err| err.to_string())?;
+      let _ = desktop.unminimize();
+      desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
+    }
   }
 
   Ok(())

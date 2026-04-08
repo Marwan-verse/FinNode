@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
+  import { appWindow } from '@tauri-apps/api/window';
 
   const SETTINGS_KEY = 'finnode.settings.v1';
   const settingsTabs = [
@@ -63,6 +64,26 @@
   let fatalError = '';
   let selectedTemplate = nodeTemplates[0].id;
   let activityLog = [];
+  let currentWindowLabel = 'main';
+  let isDesktopWindow = false;
+  let expandedNodeId = null;
+  let dragMoved = false;
+  let dragStart = { x: 0, y: 0 };
+  let editPopup = {
+    open: false,
+    x: 0,
+    y: 0,
+    nodeId: null,
+  };
+  let editDraft = {
+    name: '',
+    description: '',
+    path: '',
+    browser: '',
+    script: '',
+  };
+  let editSelectedLinks = [];
+  let editNode = null;
   let contextNode = null;
   let contextMenu = {
     open: false,
@@ -175,9 +196,15 @@
   }
 
   $: {
+    isDesktopWindow = currentWindowLabel === 'desktop';
+  }
+
+  $: {
     if (typeof document !== 'undefined') {
       document.body.classList.toggle('is-stealth', stealth);
-      document.body.classList.toggle('desktop-mode', showDesktop);
+      document.body.classList.toggle('desktop-mode', isDesktopWindow);
+      document.body.classList.toggle('desktop-overlay-window', isDesktopWindow);
+      document.body.classList.toggle('settings-app-window', !isDesktopWindow);
       document.documentElement.style.setProperty('--motion-scale', String(Math.max(0.4, settings.appearance.motionScale)));
       document.documentElement.style.setProperty('--node-glow', String(Math.max(0.15, settings.appearance.nodeGlow)));
       document.documentElement.style.setProperty('--grid-opacity', settings.appearance.showGrid ? '0.4' : '0');
@@ -185,6 +212,7 @@
   }
 
   $: contextNode = contextMenu.nodeId ? nodes.find((node) => node.id === contextMenu.nodeId) : null;
+  $: editNode = editPopup.nodeId ? nodes.find((node) => node.id === editPopup.nodeId) : null;
 
   function nodeRef(element, id) {
     nodeElements.set(id, element);
@@ -285,13 +313,19 @@
     const nextVisible = Boolean(visible);
     showDesktop = nextVisible;
     closeContextMenu();
+    if (!nextVisible) {
+      closeNodeEditor();
+      expandedNodeId = null;
+    }
 
-    updateSettings((draft) => {
-      draft.nodes.showDesktop = nextVisible;
-      if (draft.general.restoreLastMode) {
-        draft.general.lastMode = nextVisible ? 'desktop' : 'settings';
-      }
-    });
+    if (!isDesktopWindow) {
+      updateSettings((draft) => {
+        draft.nodes.showDesktop = nextVisible;
+        if (draft.general.restoreLastMode) {
+          draft.general.lastMode = nextVisible ? 'desktop' : 'settings';
+        }
+      });
+    }
 
     if (syncBackend) {
       void syncDesktopVisibilityWithBackend(nextVisible);
@@ -313,9 +347,107 @@
     };
   }
 
+  function closeNodeEditor() {
+    if (!editPopup.open) {
+      return;
+    }
+
+    editPopup = {
+      open: false,
+      x: 0,
+      y: 0,
+      nodeId: null,
+    };
+  }
+
+  function openNodeEditor(nodeId) {
+    const node = nodes.find((item) => item.id === nodeId);
+    const element = nodeElements.get(nodeId);
+    if (!node || !element) {
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const popupWidth = 320;
+    const popupHeight = 420;
+    let x = rect.right + 14;
+    if (x + popupWidth > window.innerWidth - 12) {
+      x = rect.left - popupWidth - 14;
+    }
+
+    x = Math.max(12, Math.min(x, window.innerWidth - popupWidth - 12));
+    const y = Math.max(12, Math.min(rect.top, window.innerHeight - popupHeight - 12));
+
+    editDraft = {
+      name: node.name ?? '',
+      description: node.description ?? '',
+      path: node.targets?.path ?? '',
+      browser: node.targets?.browser ?? '',
+      script: node.targets?.script ?? '',
+    };
+    editSelectedLinks = [...(node.links ?? [])];
+
+    editPopup = {
+      open: true,
+      x,
+      y,
+      nodeId,
+    };
+  }
+
+  function toggleEditLink(targetId, enabled) {
+    if (enabled) {
+      editSelectedLinks = Array.from(new Set([...editSelectedLinks, targetId]));
+      return;
+    }
+
+    editSelectedLinks = editSelectedLinks.filter((item) => item !== targetId);
+  }
+
+  function saveNodeEditor() {
+    if (!editPopup.nodeId) {
+      return;
+    }
+
+    const nodeId = editPopup.nodeId;
+    nodes = nodes.map((node) => {
+      if (node.id !== nodeId) {
+        return node;
+      }
+
+      const nextName = editDraft.name.trim() || node.name;
+      return {
+        ...node,
+        name: nextName,
+        description: editDraft.description.trim(),
+        links: Array.from(new Set(editSelectedLinks.filter((linkId) => linkId !== nodeId))),
+        targets: {
+          ...(node.targets ?? {}),
+          path: editDraft.path.trim() || null,
+          browser: editDraft.browser.trim() || null,
+          script: editDraft.script.trim() || null,
+        },
+      };
+    });
+
+    scheduleSave();
+    queueRenderConnections();
+    updateStatus('Node details updated');
+    closeNodeEditor();
+  }
+
+  function toggleNodeExpanded(nodeId) {
+    expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
+    if (expandedNodeId !== nodeId) {
+      closeNodeEditor();
+    }
+  }
+
   function openNodeContextMenu(event, nodeId) {
     event.preventDefault();
     event.stopPropagation();
+    expandedNodeId = nodeId;
+    closeNodeEditor();
 
     const maxX = window.innerWidth - 240;
     const maxY = window.innerHeight - 250;
@@ -451,13 +583,25 @@
     });
 
     const unlistenDesktop = await listen('desktop-visibility-changed', ({ payload }) => {
-      applyDesktopVisibility(Boolean(payload), false);
+      const visible = Boolean(payload);
+      if (isDesktopWindow) {
+        showDesktop = visible;
+        if (!visible) {
+          expandedNodeId = null;
+          closeContextMenu();
+          closeNodeEditor();
+        }
+      } else {
+        applyDesktopVisibility(visible, false);
+      }
       updateStatus(`Desktop nodes ${Boolean(payload) ? 'shown' : 'hidden'} from tray`);
     });
 
     const unlistenOpenSettings = await listen('open-settings-tab', ({ payload }) => {
+      if (isDesktopWindow) {
+        return;
+      }
       activeTab = typeof payload === 'string' ? payload : 'general';
-      applyDesktopVisibility(false, false);
       updateStatus('Opened settings from tray');
     });
 
@@ -465,17 +609,22 @@
     nodes = layout?.nodes ?? [];
     syncSmoothNodes(true);
 
-    if (settings.general.restoreLastMode) {
-      showDesktop = settings.general.lastMode === 'desktop';
+    if (isDesktopWindow) {
+      showDesktop = true;
     } else {
-      showDesktop = settings.nodes.showDesktop;
+      if (settings.general.restoreLastMode) {
+        showDesktop = settings.general.lastMode === 'desktop';
+      } else {
+        showDesktop = settings.nodes.showDesktop;
+      }
+
+      await syncDesktopVisibilityWithBackend(showDesktop);
     }
 
-    await syncDesktopVisibilityWithBackend(showDesktop);
     updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
     queueRenderConnections();
 
-    if (settings.general.startMinimizedToTray) {
+    if (!isDesktopWindow && settings.general.startMinimizedToTray) {
       void hideToTray();
     }
 
@@ -485,16 +634,22 @@
     const onPointerDown = (event) => {
       if (!(event.target instanceof Element)) {
         closeContextMenu();
+        closeNodeEditor();
         return;
       }
 
       if (!event.target.closest('.context-menu')) {
         closeContextMenu();
       }
+
+      if (!event.target.closest('.node-editor-popup')) {
+        closeNodeEditor();
+      }
     };
     const onKeyDown = (event) => {
       if (event.key === 'Escape') {
         closeContextMenu();
+        closeNodeEditor();
       }
     };
 
@@ -572,6 +727,10 @@
   }
 
   function beginDrag(event, id) {
+    if (event.button !== 0) {
+      return;
+    }
+
     if (event.target instanceof Element && event.target.closest('button')) {
       return;
     }
@@ -582,7 +741,13 @@
     }
 
     draggingId = id;
+    dragMoved = false;
+    dragStart = {
+      x: event.clientX,
+      y: event.clientY,
+    };
     closeContextMenu();
+    closeNodeEditor();
     const rect = event.currentTarget.getBoundingClientRect();
     dragOffset = {
       x: event.clientX - rect.left,
@@ -594,6 +759,12 @@
   function onPointerMove(event) {
     if (!draggingId || !nodeLayer) {
       return;
+    }
+
+    if (!dragMoved) {
+      const movedX = Math.abs(event.clientX - dragStart.x);
+      const movedY = Math.abs(event.clientY - dragStart.y);
+      dragMoved = movedX > 4 || movedY > 4;
     }
 
     pendingPointer = {
@@ -634,6 +805,8 @@
       return;
     }
 
+    const releasedNodeId = draggingId;
+
     if (dragFrame !== null) {
       window.cancelAnimationFrame(dragFrame);
       dragFrame = null;
@@ -646,6 +819,12 @@
     }
 
     draggingId = null;
+
+    if (!dragMoved) {
+      toggleNodeExpanded(releasedNodeId);
+    }
+
+    dragMoved = false;
   }
 
   function scheduleSave() {
@@ -714,7 +893,6 @@
     try {
       await invoke('show_settings_view');
       activeTab = 'general';
-      applyDesktopVisibility(false, true);
     } catch (error) {
       updateStatus(error instanceof Error ? error.message : String(error));
     }
@@ -849,6 +1027,7 @@
     };
 
     nodes = [...nodes, clone];
+    expandedNodeId = clone.id;
     syncSmoothNodes(true);
     scheduleSave();
     updateStatus(`Cloned node ${node.name}`);
@@ -862,6 +1041,14 @@
 
     if (contextMenu.nodeId === id) {
       closeContextMenu();
+    }
+
+    if (editPopup.nodeId === id) {
+      closeNodeEditor();
+    }
+
+    if (expandedNodeId === id) {
+      expandedNodeId = null;
     }
 
     nodes = nodes
@@ -881,6 +1068,8 @@
   }
 
   onMount(() => {
+    currentWindowLabel = appWindow.label ?? 'main';
+
     let disposed = false;
     let cleanup = () => {};
 
@@ -905,8 +1094,132 @@
 
 {#if fatalError}
   <pre class="fatal">{fatalError}</pre>
+{:else if isDesktopWindow}
+  <main class="desktop-overlay stage" class:stage--hidden={!showDesktop}>
+    <svg class="links" {viewBox}>
+      {#each links as d}
+        <path class="link" {d}></path>
+      {/each}
+    </svg>
+
+    <div class="node-layer" bind:this={nodeLayer}>
+      {#each renderNodes as node (node.id)}
+        <article
+          class="node"
+          class:node--expanded={expandedNodeId === node.id}
+          use:nodeRef={node.id}
+          style={`left:${node.renderX}px;top:${node.renderY}px;`}
+          on:pointerdown={(event) => beginDrag(event, node.id)}
+          on:contextmenu={(event) => openNodeContextMenu(event, node.id)}
+        >
+          <div class="node__surface">
+            {#if expandedNodeId === node.id}
+              <header class="node__header">
+                <div class="node__icon">{node.icon ?? '◆'}</div>
+                <div class="node__header-copy">
+                  <div class="node__name">{node.name}</div>
+                  <div class="node__meta">{node.id.slice(0, 8)}</div>
+                </div>
+                <button class="node__edit-trigger" data-open-editor on:click|stopPropagation={() => openNodeEditor(node.id)}>Edit</button>
+              </header>
+              <p class="node__body">{node.description ?? 'A linked context node'}</p>
+              <div class="node__actions">
+                <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
+                <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
+                <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
+                <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
+              </div>
+            {:else}
+              <div class="node__compact-title">{node.name}</div>
+            {/if}
+          </div>
+        </article>
+      {/each}
+    </div>
+
+    {#if contextMenu.open}
+      <div
+        class="context-menu"
+        style={`left:${contextMenu.x}px;top:${contextMenu.y}px;`}
+        role="menu"
+        tabindex="-1"
+        on:pointerdown|stopPropagation
+        on:contextmenu|preventDefault
+      >
+        <div class="context-menu__title">{contextNode?.name ?? 'Node'}</div>
+        <button
+          on:click={() => {
+            if (contextNode) {
+              openNodeEditor(contextNode.id);
+            }
+            closeContextMenu();
+          }}
+        >
+          Edit Node
+        </button>
+        <button on:click={addConnectedNodeFromMenu}>Add Connecting Node</button>
+        <button on:click={connectNearestNodeFromMenu}>Connect Nearest Node</button>
+        <button on:click={clearNodeLinksFromMenu}>Clear Node Links</button>
+        <button on:click={cloneNodeFromMenu}>Clone Node</button>
+        <button class="danger" on:click={deleteNodeFromMenu}>Delete Node</button>
+      </div>
+    {/if}
+
+    {#if editPopup.open && editNode}
+      <div
+        class="node-editor-popup"
+        style={`left:${editPopup.x}px;top:${editPopup.y}px;`}
+        on:pointerdown|stopPropagation
+      >
+        <div class="node-editor-popup__title">Edit Node</div>
+        <label>
+          <span>Title</span>
+          <input bind:value={editDraft.name} />
+        </label>
+        <label>
+          <span>Description</span>
+          <textarea rows="2" bind:value={editDraft.description}></textarea>
+        </label>
+        <label>
+          <span>Linked folder path</span>
+          <input bind:value={editDraft.path} placeholder="/home/user/project" />
+        </label>
+        <label>
+          <span>Browser URL</span>
+          <input bind:value={editDraft.browser} placeholder="https://..." />
+        </label>
+        <label>
+          <span>Script command</span>
+          <input bind:value={editDraft.script} placeholder="npm run build:web" />
+        </label>
+
+        <div class="node-editor-popup__links">
+          <div class="section__title">Connected Node Links</div>
+          {#if nodes.filter((node) => node.id !== editNode.id).length === 0}
+            <div class="hint">No other nodes available.</div>
+          {:else}
+            {#each nodes.filter((node) => node.id !== editNode.id) as candidate (candidate.id)}
+              <label class="link-toggle">
+                <span>{candidate.name}</span>
+                <input
+                  type="checkbox"
+                  checked={editSelectedLinks.includes(candidate.id)}
+                  on:change={(event) => toggleEditLink(candidate.id, event.currentTarget.checked)}
+                />
+              </label>
+            {/each}
+          {/if}
+        </div>
+
+        <div class="node-editor-popup__actions">
+          <button on:click={saveNodeEditor}>Save</button>
+          <button class="ghost" on:click={closeNodeEditor}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+  </main>
 {:else}
-  <div class="hud-shell" class:desktop-mode={showDesktop}>
+  <div class="settings-app">
     <button
       class="ghost-fin"
       title="Reveal FinNode"
@@ -914,12 +1227,12 @@
       on:mouseenter={revealFromGhost}
     ></button>
 
-    <aside class="rail">
+    <aside class="rail rail--settings">
       <div class="brand">
         <div class="brand__mark">⟡</div>
         <div>
           <div class="brand__name">FinNode Settings</div>
-          <div class="brand__tag">control center + desktop nodes</div>
+          <div class="brand__tag">desktop node control center</div>
         </div>
       </div>
 
@@ -962,7 +1275,7 @@
               })}
             />
           </label>
-          <p class="hint">Open-on-login is saved here. System integration can be wired later via autostart plugin.</p>
+          <p class="hint">Window size is fixed now. Use tray controls to show or hide desktop nodes.</p>
         {:else if activeTab === 'appearance'}
           <div class="section__title">Appearance</div>
           <label class="toggle-row">
@@ -995,18 +1308,13 @@
             <button class="chip" on:click={addNodeFromTemplate}>Add Node</button>
           </div>
 
+          <div class="hint">Node editing now happens on desktop: click a node circle, then click Edit.</div>
+
           <div class="node-manager">
             {#each nodes as node, index (node.id)}
               <div class="node-row">
-                <input value={node.name} on:change={(event) => renameNode(node.id, event.currentTarget.value)} />
-                  <input
-                    class="node-row__path"
-                    value={node.targets?.path ?? ''}
-                    placeholder="Linked folder path (e.g. /home/user/project)"
-                    on:change={(event) => setNodeLinkedFolder(node.id, event.currentTarget.value)}
-                  />
+                <div class="node-row__title">{node.name}</div>
                 <div class="node-row__actions">
-                    <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
                   <button on:click={() => moveNode(node.id, -1)} disabled={index === 0}>Up</button>
                   <button on:click={() => moveNode(node.id, 1)} disabled={index === nodes.length - 1}>Down</button>
                   <button on:click={() => cloneNode(node.id)}>Clone</button>
@@ -1026,7 +1334,7 @@
           <div class="section__title">Shortcuts</div>
           <div class="hint">Stealth Toggle: {settings.shortcuts.toggleStealth}</div>
           <div class="hint">Tray click: Open Settings</div>
-          <div class="hint">Tip: use Node Manager for quick edit and reorder.</div>
+          <div class="hint">Tip: right-click any desktop node for connection actions.</div>
         {/if}
       </div>
 
@@ -1042,84 +1350,29 @@
           {/if}
         </div>
       </div>
-    </aside>
 
-    <main class="stage" class:stage--hidden={!showDesktop}>
-      <svg class="links" {viewBox}>
-        {#each links as d}
-          <path class="link" {d}></path>
-        {/each}
-      </svg>
-
-      <div class="node-layer" bind:this={nodeLayer}>
-        {#each renderNodes as node (node.id)}
-          <article
-            class="node"
-            use:nodeRef={node.id}
-            style={`left:${node.renderX}px;top:${node.renderY}px;`}
-            on:pointerdown={(event) => beginDrag(event, node.id)}
-            on:contextmenu={(event) => openNodeContextMenu(event, node.id)}
-          >
-            <div class="node__surface">
-              <header class="node__header">
-                <div class="node__icon">{node.icon ?? '◆'}</div>
-                <div>
-                  <div class="node__name">{node.name}</div>
-                  <div class="node__meta">{node.id.slice(0, 8)}</div>
-                </div>
-              </header>
-              <p class="node__body">{node.description ?? 'A linked context node'}</p>
-              <div class="node__actions">
-                <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
-              </div>
-            </div>
-          </article>
-        {/each}
-      </div>
-
-      {#if contextMenu.open}
-        <div
-          class="context-menu"
-          style={`left:${contextMenu.x}px;top:${contextMenu.y}px;`}
-          role="menu"
-          tabindex="-1"
-          on:pointerdown|stopPropagation
-          on:contextmenu|preventDefault
-        >
-          <div class="context-menu__title">{contextNode?.name ?? 'Node'}</div>
-          <button on:click={addConnectedNodeFromMenu}>Add Connecting Node</button>
-          <button on:click={connectNearestNodeFromMenu}>Connect Nearest Node</button>
-          <button on:click={clearNodeLinksFromMenu}>Clear Node Links</button>
-          <button on:click={cloneNodeFromMenu}>Clone Node</button>
-          <button class="danger" on:click={deleteNodeFromMenu}>Delete Node</button>
-        </div>
-      {/if}
-
-      <div class="status-bar">
+      <div class="status-bar status-bar--settings">
         <span>{statusText}</span>
         <span class="status-dot"></span>
       </div>
-    </main>
+    </aside>
   </div>
 {/if}
 
 <style>
   :global(:root) {
     color-scheme: dark;
-    --bg: #04070d;
-    --panel: rgba(12, 18, 29, 0.68);
-    --panel-strong: rgba(16, 26, 41, 0.88);
-    --line: rgba(120, 227, 255, 0.22);
+    --bg: #081321;
+    --panel: rgba(9, 18, 31, 0.88);
+    --panel-strong: rgba(13, 24, 39, 0.96);
+    --line: rgba(120, 227, 255, 0.25);
     --text: #e8f7ff;
-    --muted: rgba(200, 238, 255, 0.66);
-    --glow: rgba(0, 255, 255, 0.45);
+    --muted: rgba(200, 238, 255, 0.72);
+    --glow: rgba(124, 244, 255, 0.45);
     --accent: #7cf4ff;
     --accent-2: #9dffb9;
     --danger: #ff8fa3;
-    --shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+    --shadow: 0 20px 56px rgba(0, 0, 0, 0.42);
     --motion-scale: 1;
     --node-glow: 0.45;
     --grid-opacity: 0.4;
@@ -1137,9 +1390,9 @@
     margin: 0;
     overflow: hidden;
     background:
-      radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.18), transparent 28%),
-      radial-gradient(circle at 80% 10%, rgba(89, 255, 197, 0.16), transparent 24%),
-      linear-gradient(135deg, #02040a 0%, #07111d 48%, #02040a 100%);
+      radial-gradient(circle at 18% 15%, rgba(52, 201, 255, 0.2), transparent 34%),
+      radial-gradient(circle at 88% 8%, rgba(157, 255, 185, 0.16), transparent 28%),
+      linear-gradient(145deg, #050b14 0%, #0a1628 55%, #050b14 100%);
     color: var(--text);
   }
 
@@ -1149,16 +1402,16 @@
     inset: 0;
     pointer-events: none;
     background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-    background-size: 42px 42px;
+    background-size: 44px 44px;
     mask-image: radial-gradient(circle at center, black 45%, transparent 82%);
     opacity: var(--grid-opacity);
   }
 
-  :global(body.desktop-mode) {
+  :global(body.desktop-overlay-window) {
     background: transparent;
   }
 
-  :global(body.desktop-mode)::before {
+  :global(body.desktop-overlay-window)::before {
     opacity: 0;
   }
 
@@ -1176,20 +1429,18 @@
     height: 100%;
   }
 
-  .hud-shell {
-    display: grid;
-    grid-template-columns: 420px 1fr;
+  .settings-app {
+    position: relative;
+    display: flex;
     width: 100%;
     height: 100%;
   }
 
-  .hud-shell.desktop-mode {
-    grid-template-columns: 1fr;
-  }
-
-  .hud-shell.desktop-mode .rail,
-  .hud-shell.desktop-mode .ghost-fin {
-    display: none;
+  .desktop-overlay {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: transparent;
   }
 
   .ghost-fin {
@@ -1211,13 +1462,18 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 20px;
-    padding: 24px;
-    background: linear-gradient(180deg, rgba(12, 18, 29, 0.92), rgba(8, 12, 19, 0.48));
-    border-right: 1px solid rgba(124, 244, 255, 0.16);
+    gap: 14px;
+    padding: 20px;
+    background: linear-gradient(180deg, rgba(10, 18, 30, 0.98), rgba(7, 14, 24, 0.95));
+    border-right: 1px solid rgba(124, 244, 255, 0.2);
     backdrop-filter: blur(24px) saturate(160%);
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04);
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
     transition: transform 260ms ease, opacity 260ms ease;
+  }
+
+  .rail--settings {
+    width: 100%;
+    border-right: 0;
   }
 
   .brand {
@@ -1239,7 +1495,7 @@
   }
 
   .brand__name {
-    font-size: 1.4rem;
+    font-size: 1.32rem;
     font-weight: 700;
     letter-spacing: 0.04em;
   }
@@ -1252,28 +1508,33 @@
   }
 
   .rail__section {
-    padding: 18px;
-    border: 1px solid rgba(124, 244, 255, 0.16);
-    border-radius: 22px;
-    background: rgba(7, 12, 20, 0.42);
+    padding: 16px;
+    border: 1px solid rgba(124, 244, 255, 0.2);
+    border-radius: 18px;
+    background: rgba(6, 12, 20, 0.52);
   }
 
   .rail__tabs {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
   }
 
   .tab {
     border: 1px solid rgba(124, 244, 255, 0.2);
     background: rgba(8, 15, 26, 0.6);
     color: var(--muted);
-    border-radius: 12px;
-    padding: 10px 8px;
+    border-radius: 11px;
+    padding: 9px 8px;
     font: inherit;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     cursor: pointer;
-    transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+    transition: border-color 140ms ease, color 140ms ease, background 140ms ease, transform 140ms ease;
+  }
+
+  .tab:hover {
+    transform: translateY(-1px);
+    border-color: rgba(124, 244, 255, 0.38);
   }
 
   .tab--active {
@@ -1286,8 +1547,8 @@
   .settings-center {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    min-height: 320px;
+    gap: 8px;
+    min-height: 300px;
   }
 
   .toggle-row,
@@ -1297,7 +1558,7 @@
     align-items: center;
     gap: 10px;
     color: rgba(233, 248, 255, 0.92);
-    font-size: 0.88rem;
+    font-size: 0.84rem;
     margin-top: 8px;
   }
 
@@ -1313,32 +1574,29 @@
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 10px;
-    margin-top: 8px;
+    margin-top: 6px;
   }
 
   .template-row select,
-  .node-row input {
+  .node-editor-popup input,
+  .node-editor-popup textarea {
     width: 100%;
     border: 1px solid rgba(124, 244, 255, 0.22);
     background: rgba(8, 15, 26, 0.8);
     color: var(--text);
     border-radius: 12px;
-    padding: 9px 10px;
+    padding: 8px 10px;
     font: inherit;
-  }
-
-  .node-row__path {
-    font-size: 0.8rem;
   }
 
   .node-manager {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    max-height: 230px;
+    gap: 8px;
+    max-height: 180px;
     overflow: auto;
     margin-top: 8px;
-    padding-right: 4px;
+    padding-right: 2px;
   }
 
   .node-manager__title {
@@ -1347,28 +1605,46 @@
 
   .node-row {
     display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
     border: 1px solid rgba(124, 244, 255, 0.12);
     border-radius: 12px;
-    background: rgba(7, 12, 20, 0.5);
+    background: rgba(8, 14, 23, 0.58);
+  }
+
+  .node-row__title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: rgba(233, 248, 255, 0.94);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .node-row__actions {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
+    width: 220px;
   }
 
   .node-row__actions button {
     border: 1px solid rgba(124, 244, 255, 0.2);
     background: rgba(8, 15, 26, 0.78);
     color: var(--text);
-    border-radius: 999px;
+    border-radius: 10px;
     padding: 6px 8px;
     font-size: 0.72rem;
     cursor: pointer;
+  }
+
+  .node-row__actions button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   .node-row__actions .danger {
@@ -1380,7 +1656,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    max-height: 130px;
+    max-height: 110px;
     overflow: auto;
   }
 
@@ -1400,13 +1676,15 @@
   }
 
   .chip,
-  .node__actions button {
+  .node__actions button,
+  .node-editor-popup__actions button {
     border: 1px solid rgba(124, 244, 255, 0.22);
     background: rgba(8, 15, 26, 0.78);
     color: var(--text);
-    border-radius: 999px;
-    padding: 10px 14px;
+    border-radius: 12px;
+    padding: 9px 12px;
     font: inherit;
+    font-size: 0.8rem;
     cursor: pointer;
     transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
   }
@@ -1420,7 +1698,7 @@
 
   .chip {
     width: 100%;
-    margin-top: 10px;
+    margin-top: 8px;
   }
 
   .chip--danger {
@@ -1428,8 +1706,17 @@
     color: #ffd9e1;
   }
 
+  .chip:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
+
   .stage {
     position: relative;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     transition: opacity calc(220ms * var(--motion-scale)) ease, transform calc(220ms * var(--motion-scale)) ease;
   }
@@ -1459,27 +1746,37 @@
   }
 
   .node-layer {
-    padding: 32px;
+    padding: 26px;
   }
 
   .node {
     position: absolute;
-    width: 240px;
-    min-height: 170px;
-    border-radius: 26px;
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
     cursor: grab;
     user-select: none;
     will-change: left, top;
+    z-index: 2;
     transition: left calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1), top calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  .node.node--expanded {
+    width: 272px;
+    height: auto;
+    min-height: 190px;
+    border-radius: 22px;
+    z-index: 5;
   }
 
   .node__surface {
     position: relative;
-    display: flex;
-    flex-direction: column;
-    min-height: 170px;
-    padding: 16px;
-    border-radius: 26px;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 12px;
+    border-radius: inherit;
     background: linear-gradient(180deg, rgba(18, 27, 41, 0.94), rgba(10, 15, 24, 0.82));
     border: 1px solid rgba(124, 244, 255, 0.2);
     box-shadow: var(--shadow), 0 0 calc(30px * var(--node-glow)) rgba(124, 244, 255, calc(0.2 * var(--node-glow))) inset;
@@ -1493,9 +1790,29 @@
     content: '';
     position: absolute;
     inset: 0;
-    border-radius: 26px;
+    border-radius: inherit;
     box-shadow: 0 0 calc(24px * var(--node-glow)) rgba(124, 244, 255, calc(0.14 * var(--node-glow)));
     pointer-events: none;
+  }
+
+  .node--expanded .node__surface {
+    display: flex;
+    flex-direction: column;
+    min-height: 190px;
+    padding: 16px;
+    border-radius: 22px;
+    align-items: stretch;
+  }
+
+  .node__compact-title {
+    max-width: 90%;
+    text-align: center;
+    font-size: 0.74rem;
+    letter-spacing: 0.03em;
+    font-weight: 700;
+    line-height: 1.15;
+    color: rgba(233, 248, 255, 0.95);
+    text-shadow: 0 0 12px rgba(124, 244, 255, 0.26);
   }
 
   :global(.node.is-dragging) {
@@ -1510,8 +1827,13 @@
 
   .node__header {
     display: flex;
-    gap: 12px;
+    gap: 10px;
     align-items: center;
+  }
+
+  .node__header-copy {
+    min-width: 0;
+    flex: 1;
   }
 
   .node__icon {
@@ -1525,6 +1847,21 @@
     box-shadow: 0 0 15px rgba(124, 244, 255, 0.18);
   }
 
+  .node__edit-trigger {
+    border: 1px solid rgba(124, 244, 255, 0.25);
+    background: rgba(7, 14, 24, 0.86);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 5px 10px;
+    font: inherit;
+    font-size: 0.76rem;
+    cursor: pointer;
+  }
+
+  .node__edit-trigger:hover {
+    border-color: rgba(124, 244, 255, 0.45);
+  }
+
   .node__name {
     font-size: 1.05rem;
     font-weight: 700;
@@ -1536,35 +1873,38 @@
   }
 
   .node__body {
-    margin: 14px 0;
+    margin: 12px 0;
     color: rgba(233, 248, 255, 0.82);
     line-height: 1.4;
+    font-size: 0.82rem;
   }
 
   .node__actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 8px;
   }
 
   .status-bar {
-    position: absolute;
-    left: 24px;
-    right: 24px;
-    bottom: 24px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 14px 18px;
-    border-radius: 18px;
+    padding: 12px 14px;
+    border-radius: 14px;
     background: rgba(5, 9, 16, 0.58);
-    border: 1px solid rgba(124, 244, 255, 0.16);
-    backdrop-filter: blur(18px) saturate(160%);
+    border: 1px solid rgba(124, 244, 255, 0.2);
+    backdrop-filter: blur(16px) saturate(150%);
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  .status-bar--settings {
+    margin-top: auto;
   }
 
   .context-menu {
     position: fixed;
-    width: 220px;
+    width: 236px;
     z-index: 120;
     border: 1px solid rgba(124, 244, 255, 0.28);
     border-radius: 14px;
@@ -1609,6 +1949,80 @@
     color: #ffd9e1;
   }
 
+  .node-editor-popup {
+    position: fixed;
+    width: 320px;
+    max-height: min(420px, calc(100vh - 24px));
+    overflow: auto;
+    z-index: 130;
+    border: 1px solid rgba(124, 244, 255, 0.35);
+    border-radius: 14px;
+    background: rgba(8, 14, 24, 0.96);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5), 0 0 20px rgba(124, 244, 255, 0.18);
+    backdrop-filter: blur(16px);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .node-editor-popup__title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: rgba(233, 248, 255, 0.95);
+    margin-bottom: 2px;
+  }
+
+  .node-editor-popup label {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .node-editor-popup label > span {
+    font-size: 0.74rem;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+  }
+
+  .node-editor-popup textarea {
+    resize: vertical;
+    min-height: 58px;
+  }
+
+  .node-editor-popup__links {
+    border-top: 1px solid rgba(124, 244, 255, 0.15);
+    margin-top: 4px;
+    padding-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .link-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.78rem;
+    color: rgba(233, 248, 255, 0.9);
+  }
+
+  .link-toggle input {
+    accent-color: #7cf4ff;
+  }
+
+  .node-editor-popup__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .node-editor-popup__actions .ghost {
+    background: rgba(10, 18, 28, 0.65);
+  }
+
   .status-dot {
     width: 10px;
     height: 10px;
@@ -1619,7 +2033,7 @@
   }
 
   .meter {
-    margin-top: auto;
+    min-height: 0;
   }
 
   .hint {
@@ -1654,24 +2068,17 @@
     }
   }
 
-  @media (max-width: 1000px) {
-    .hud-shell {
-      grid-template-columns: 1fr;
-    }
-
-    .rail {
-      max-height: 280px;
-      overflow: auto;
+  @media (max-width: 760px) {
+    .node-editor-popup {
+      width: min(92vw, 320px);
     }
 
     .node-layer {
       padding: 18px;
     }
 
-    .status-bar {
-      left: 14px;
-      right: 14px;
-      bottom: 14px;
+    .node.node--expanded {
+      width: min(90vw, 272px);
     }
   }
 </style>
