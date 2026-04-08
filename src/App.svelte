@@ -61,6 +61,9 @@
   let commandHistory = [];
   // Theme
   let settings = loadSettings();
+  // Platform
+  let osPlatform = 'windows';
+  let supportsHitRegions = true;
 
   function isLockedNode(nodeOrId) {
     const id = typeof nodeOrId === 'string' ? nodeOrId : nodeOrId?.id;
@@ -147,6 +150,7 @@
 
   $: { renderNodes = nodes.map(n => { const s = smoothNodes.find(i=>i.id===n.id); const raw = draggingId===n.id; return {...n, renderX: raw?n.x:(s?s.x:n.x), renderY: raw?n.y:(s?s.y:n.y)}; }); }
   $: isDesktopWindow = currentWindowLabel === 'desktop';
+  $: supportsHitRegions = osPlatform === 'windows' || osPlatform === 'linux';
   $: { if (typeof document !== 'undefined') {
     document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
     document.body.classList.toggle('is-stealth', stealth);
@@ -162,6 +166,19 @@
   function nodeRef(el, id) { nodeElements.set(id, el); queueRender(); return { destroy() { nodeElements.delete(id); scheduleHitRegions(); } }; }
   function queueRender() { void tick().then(()=>{ renderConnections(); scheduleHitRegions(); }); }
 
+  async function detectPlatform() {
+    try {
+      osPlatform = await invoke('get_platform');
+    } catch {
+      osPlatform = 'windows';
+    }
+    const supported = osPlatform === 'windows' || osPlatform === 'linux';
+    if (!supported) {
+      updateSettings(d=>{d.nodes.clickThrough=false;});
+      void syncDesktopCT(false);
+    }
+  }
+
   function collectHitRects() {
     const rects = [];
     for (const el of nodeElements.values()) rects.push(el.getBoundingClientRect());
@@ -174,7 +191,7 @@
   }
 
   function scheduleHitRegions() {
-    if (!isDesktopWindow) return;
+    if (!isDesktopWindow || !supportsHitRegions) return;
     if (hitRegionFrame !== null) return;
     hitRegionFrame = requestAnimationFrame(()=>{
       hitRegionFrame = null;
@@ -183,7 +200,7 @@
   }
 
   async function syncHitRegions() {
-    if (!isDesktopWindow) return;
+    if (!isDesktopWindow || !supportsHitRegions) return;
     if (!showDesktop || !settings.nodes.clickThrough) {
       try { await invoke('clear_desktop_hit_regions'); } catch (e) { updateStatus(String(e)); }
       return;
@@ -225,7 +242,17 @@
 
   async function syncDesktopVis(v) { try { await invoke('set_desktop_visibility',{visible:v}); } catch(e) { updateStatus(String(e)); } }
   async function syncDesktopCT(e) { try { await invoke('set_desktop_click_through',{enabled:e}); } catch(e2) { updateStatus(String(e2)); } }
-  function updateDesktopCT(en,sync=true) { updateSettings(d=>{d.nodes.clickThrough=Boolean(en);}); if(sync) void syncDesktopCT(Boolean(en)); scheduleHitRegions(); }
+  function updateDesktopCT(en,sync=true) {
+    if (!supportsHitRegions) {
+      updateSettings(d=>{d.nodes.clickThrough=false;});
+      if (sync) void syncDesktopCT(false);
+      updateStatus(`Background click-through not supported on ${osPlatform}`);
+      return;
+    }
+    updateSettings(d=>{d.nodes.clickThrough=Boolean(en);});
+    if(sync) void syncDesktopCT(Boolean(en));
+    scheduleHitRegions();
+  }
 
   function applyDesktopVis(vis,sync=true) {
     showDesktop = Boolean(vis); closeCtx(); if(!vis){closeEditor();expandedNodeId=null;}
@@ -456,6 +483,7 @@
     const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
     const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
 
+    await detectPlatform();
     await loadWorkspaces();
     if(isDesktopWindow) { showDesktop=true; await syncDesktopCT(settings.nodes.clickThrough); }
     else { showDesktop=settings.general.restoreLastMode?settings.general.lastMode==='desktop':settings.nodes.showDesktop; await syncDesktopVis(showDesktop); await syncDesktopCT(settings.nodes.clickThrough); }
@@ -667,7 +695,7 @@
         {:else if activeTab==='nodes'}
           <div class="section__title">Desktop Nodes</div>
           <button class="chip" on:click={toggleDesktop}>{showDesktop?'Hide Desktop':'Show Desktop'}</button>
-          <label class="toggle-row"><span>Background click-through</span><input type="checkbox" checked={settings.nodes.clickThrough} on:change={ev=>updateDesktopCT(ev.currentTarget.checked)}/></label>
+          <label class="toggle-row"><span>Background click-through</span><input type="checkbox" checked={settings.nodes.clickThrough} disabled={!supportsHitRegions} on:change={ev=>updateDesktopCT(ev.currentTarget.checked)}/></label>
           <label class="slider-row"><span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span><input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={ev=>updateSettings(d=>{d.nodes.smoothness=Number(ev.currentTarget.value);})}/></label>
           <div class="section__title" style="margin-top:14px;">Workspaces</div>
           <div class="template-row">

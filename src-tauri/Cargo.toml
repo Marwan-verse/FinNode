@@ -14,5 +14,9 @@ open = "5"
 tauri = { version = "1", features = [ "system-tray", "global-shortcut", "shell-open"] }
 fs2 = "0.4"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.15"
+cairo-rs = { version = "0.15", package = "cairo-rs" }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

@@ -332,6 +332,11 @@ fn set_desktop_visibility(app: AppHandle, state: State<'_, AppState>, visible: b
 }
 
 #[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
+#[tauri::command]
 fn set_desktop_click_through(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     update_desktop_click_through(&app, &state, enabled)
 }
@@ -343,7 +348,12 @@ fn set_desktop_hit_regions(app: AppHandle, regions: Vec<HitRegion>) -> Result<()
         let window = app.get_window("desktop").ok_or("desktop window not found")?;
         apply_window_hit_regions(&window, &regions)?;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let window = app.get_window("desktop").ok_or("desktop window not found")?;
+        apply_window_hit_regions(&window, &regions)?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (app, regions);
     }
@@ -357,7 +367,12 @@ fn clear_desktop_hit_regions(app: AppHandle) -> Result<(), String> {
         let window = app.get_window("desktop").ok_or("desktop window not found")?;
         clear_window_hit_regions(&window)?;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let window = app.get_window("desktop").ok_or("desktop window not found")?;
+        clear_window_hit_regions(&window)?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = app;
     }
@@ -509,6 +524,67 @@ fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<(), String> {
+    use cairo::{RectangleInt, Region};
+    use gtk::prelude::WidgetExt;
+    use std::sync::mpsc;
+
+    let window = window.clone();
+    let regions = regions.to_vec();
+    let (tx, rx) = mpsc::channel();
+
+    window.run_on_main_thread(move || {
+        let result = (|| -> Result<(), String> {
+            let gtk_window = window.gtk_window().map_err(|e| e.to_string())?;
+            let gdk_window = gtk_window.window().ok_or("gdk window not available")?;
+            let region = Region::create();
+            for r in regions.iter() {
+                if r.right <= r.left || r.bottom <= r.top {
+                    continue;
+                }
+                let rect = RectangleInt {
+                    x: r.left,
+                    y: r.top,
+                    width: r.right - r.left,
+                    height: r.bottom - r.top,
+                };
+                region.union_rectangle(&rect).map_err(|e| e.to_string())?;
+            }
+            gdk_window.input_shape_combine_region(&region, 0, 0);
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+
+    rx.recv().unwrap_or_else(|_| Err("failed to update hit regions".into()))
+}
+
+#[cfg(target_os = "linux")]
+fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
+    use cairo::{RectangleInt, Region};
+    use gtk::prelude::WidgetExt;
+    use std::sync::mpsc;
+
+    let window = window.clone();
+    let (tx, rx) = mpsc::channel();
+
+    window.run_on_main_thread(move || {
+        let result = (|| -> Result<(), String> {
+            let gtk_window = window.gtk_window().map_err(|e| e.to_string())?;
+            let gdk_window = gtk_window.window().ok_or("gdk window not available")?;
+            let (_, _, width, height) = gdk_window.geometry();
+            let rect = RectangleInt { x: 0, y: 0, width, height };
+            let region = Region::create_rectangle(&rect);
+            gdk_window.input_shape_combine_region(&region, 0, 0);
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+
+    rx.recv().unwrap_or_else(|_| Err("failed to clear hit regions".into()))
+}
+
 // ── Desktop Mode ─────────────────────────────────────────────────────────────
 
 fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: bool) -> Result<(), String> {
@@ -556,7 +632,12 @@ fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), Str
         let _ = enabled;
         return window.set_ignore_cursor_events(false).map_err(|e| e.to_string());
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = enabled;
+        return window.set_ignore_cursor_events(false).map_err(|e| e.to_string());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())
     }
@@ -980,6 +1061,7 @@ fn main() {
             load_layout, save_layout, launch_node, run_node_macro,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
             set_desktop_hit_regions, clear_desktop_hit_regions,
+            get_platform,
             hide_main_window, show_main_window, show_settings_view, exit_app,
             pin_desktop_bottom,
             list_workspaces, create_workspace, switch_workspace, delete_workspace, rename_workspace,
