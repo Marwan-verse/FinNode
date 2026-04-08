@@ -31,7 +31,7 @@
   let dragFrame = null, nodeSpringFrame = null, saveTimer = null;
   let statusText = 'Loading...', fatalError = '';
   let activityLog = [], currentWindowLabel = 'main', isDesktopWindow = false;
-  let expandedNodeId = null, dragMoved = false, dragStart = {x:0,y:0};
+  let dragMoved = false, dragStart = {x:0,y:0};
   let editPopup = {open:false,x:0,y:0,nodeId:null};
   let editDraft = {name:'',description:'',path:'',browser:'',script:'',color:'cyan',macros:[]};
   let editSelectedLinks = [], editNode = null, contextNode = null;
@@ -51,7 +51,7 @@
   // Node bounds update (for cursor polling click-through)
   let boundsFrame = null;
   // Tooltip
-  let hoveredId = null, tooltipPos = {x:0,y:0}, tooltipTimer = null;
+  let hoveredId = null, tooltipPos = {x:0,y:0};
   // Highlight connections
   let highlightNodeId = null;
   // Command history
@@ -347,7 +347,7 @@
   }
 
   function applyDesktopVis(vis,sync=true) {
-    showDesktop = Boolean(vis); closeCtx(); if(!vis){closeEditor();expandedNodeId=null;}
+    showDesktop = Boolean(vis); closeCtx(); if(!vis){closeEditor();}
     if(!isDesktopWindow) updateSettings(d=>{d.nodes.showDesktop=showDesktop; if(d.general.restoreLastMode)d.general.lastMode=showDesktop?'desktop':'settings';});
     if(sync) void syncDesktopVis(showDesktop);
     queueRender();
@@ -394,12 +394,6 @@
   function addMacroStep() { editDraft.macros = [...editDraft.macros, {action:'open-browser',value:''}]; }
   function removeMacroStep(i) { editDraft.macros = editDraft.macros.filter((_,idx)=>idx!==i); }
 
-  function toggleExpanded(nid) {
-    if (isLockedNode(nid)) return;
-    expandedNodeId = expandedNodeId===nid ? null : nid;
-    if(expandedNodeId!==nid) closeEditor();
-    void tick().then(scheduleBoundsUpdate);
-  }
   function openEditorFromMenu() {
     if (contextNode && !isLockedNode(contextNode)) {
       openEditor(contextNode.id);
@@ -502,11 +496,7 @@
 
   // Core CRUD
   function uid(base) { return `${base}-${Math.random().toString(36).slice(2,8)}`; }
-  function hasText(v) { return typeof v==='string'&&v.trim().length>0; }
-  function hasAction(n,a) { const t=n?.targets??{}; if(a==='open-path')return hasText(t.path); if(a==='open-editor')return hasText(t.editor)||hasText(t.path); if(a==='open-browser')return hasText(t.browser); if(a==='run-script')return hasText(t.script); return false; }
-  function hasAnyActions(n) { return hasAction(n,'open-path')||hasAction(n,'open-editor')||hasAction(n,'open-browser')||hasAction(n,'run-script'); }
   async function launchNode(n,a) { try { await invoke('launch_node',{node:n,action:a}); updateStatus(`Launched ${n.name}`); } catch(e) { updateStatus(String(e)); } }
-  async function runMacro(steps) { try { await invoke('run_node_macro',{steps}); updateStatus('Macro started'); } catch(e) { updateStatus(String(e)); } }
   async function toggleStealth() { try { await invoke('set_stealth_mode',{enabled:!stealth}); } catch(e) { updateStatus(String(e)); } }
   async function openSettingsView() { try { await invoke('show_settings_view'); } catch(e) { updateStatus(String(e)); } }
   async function revealGhost() { if(!stealth) return; try { await invoke('set_stealth_mode',{enabled:false}); } catch(e) { updateStatus(String(e)); } }
@@ -536,7 +526,6 @@
     if (isLockedNode(id)) { updateStatus('Main node is locked'); return; }
     if(contextMenu.nodeId===id)closeCtx();
     if(editPopup.nodeId===id)closeEditor();
-    if(expandedNodeId===id)expandedNodeId=null;
     nodes=nodes.filter(n=>n.id!==id).map(n=>({...n,links:(n.links??[]).filter(l=>l!==id)}));
     syncSmooth(true); scheduleSave();
   }
@@ -574,13 +563,41 @@
     ev.stopPropagation();
   }
 
+  function getWorkspaceResizeDirection(ev, rect) {
+    const edge = 10;
+    const left = (ev.clientX - rect.left) <= edge;
+    const right = (rect.right - ev.clientX) <= edge;
+    const top = (ev.clientY - rect.top) <= edge;
+    const bottom = (rect.bottom - ev.clientY) <= edge;
+
+    let dir = '';
+    if (top) dir += 'n';
+    else if (bottom) dir += 's';
+    if (left) dir += 'w';
+    else if (right) dir += 'e';
+    return dir;
+  }
+
   function beginWorkspaceResize(ev) {
     if (ev.button !== 0) return;
+
+    if (ev.target instanceof Element && ev.target.closest('.node, .node-workspace__chrome, .node-editor-popup, .context-menu, .batch-bar, .launcher-overlay, button, input, textarea, select')) {
+      return;
+    }
+
+    if (!(ev.currentTarget instanceof HTMLElement)) return;
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const dir = getWorkspaceResizeDirection(ev, rect);
+    if (!dir) return;
+
     workspaceResize = {
       startX: ev.clientX,
       startY: ev.clientY,
+      x: nodeWorkspace.x,
+      y: nodeWorkspace.y,
       width: nodeWorkspace.width,
-      height: nodeWorkspace.height
+      height: nodeWorkspace.height,
+      dir
     };
     ev.preventDefault();
     ev.stopPropagation();
@@ -610,9 +627,27 @@
     }
 
     if (workspaceResize) {
-      const width = workspaceResize.width + (ev.clientX - workspaceResize.startX);
-      const height = workspaceResize.height + (ev.clientY - workspaceResize.startY);
-      nodeWorkspace = clampWorkspaceRect({ ...nodeWorkspace, width, height });
+      const dx = ev.clientX - workspaceResize.startX;
+      const dy = ev.clientY - workspaceResize.startY;
+      const dir = workspaceResize.dir || '';
+
+      let x = workspaceResize.x;
+      let y = workspaceResize.y;
+      let width = workspaceResize.width;
+      let height = workspaceResize.height;
+
+      if (dir.includes('e')) width = workspaceResize.width + dx;
+      if (dir.includes('s')) height = workspaceResize.height + dy;
+      if (dir.includes('w')) {
+        width = workspaceResize.width - dx;
+        x = workspaceResize.x + dx;
+      }
+      if (dir.includes('n')) {
+        height = workspaceResize.height - dy;
+        y = workspaceResize.y + dy;
+      }
+
+      nodeWorkspace = clampWorkspaceRect({ x, y, width, height });
       scheduleBoundsUpdate();
       return;
     }
@@ -667,7 +702,7 @@
     if(dragMoved){syncSmooth(true);scheduleSave();pinBottom();}
     if(!dragMoved&&!lastClickWasSelect) {
       if (isLockedNode(rid)) {
-        expandedNodeId = null; closeEditor();
+        closeEditor();
         void openSettingsView();
       }
     }
@@ -711,7 +746,7 @@
   async function bootstrap() {
     const ul1=await listen('stealth-changed',({payload})=>{stealth=Boolean(payload);updateStatus(`Stealth ${stealth?'on':'off'}`);});
     const ul2=await listen('layout-updated',async()=>{await loadWorkspaces();});
-    const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){expandedNodeId=null;closeCtx();closeEditor();} scheduleBoundsUpdate();}else applyDesktopVis(v,false);});
+    const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){closeCtx();closeEditor();} scheduleBoundsUpdate();}else applyDesktopVis(v,false);});
     const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);}); scheduleBoundsUpdate();});
     const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
     const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
@@ -774,10 +809,10 @@
 {:else if isDesktopWindow}
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <main class="desktop-overlay stage" class:stage--hidden={!showDesktop}>
-    <section class="node-workspace" style="left:{nodeWorkspace.x}px;top:{nodeWorkspace.y}px;width:{nodeWorkspace.width}px;height:{nodeWorkspace.height}px;">
+    <section class="node-workspace" style="left:{nodeWorkspace.x}px;top:{nodeWorkspace.y}px;width:{nodeWorkspace.width}px;height:{nodeWorkspace.height}px;" on:pointerdown={beginWorkspaceResize}>
       <header class="node-workspace__chrome" on:pointerdown={beginWorkspaceDrag}>
         <div class="node-workspace__title">Node Window</div>
-        <div class="node-workspace__hint">Drag to move | Resize corner</div>
+        <div class="node-workspace__hint">Drag to move | Resize from border</div>
       </header>
 
       <div class="node-workspace__canvas">
@@ -789,7 +824,7 @@
 
         <div class="node-layer" bind:this={nodeLayer}>
           {#each renderNodes as node (node.id)}
-            <article class="node" class:node--expanded={expandedNodeId===node.id} class:node--selected={selectedIds.has(node.id)}
+            <article class="node" class:node--selected={selectedIds.has(node.id)}
               use:nodeRef={node.id} style="left:{node.renderX}px;top:{node.renderY}px;--nc:{nodeColor(node)};"
               on:pointerdown={ev=>beginDrag(ev,node.id)} on:contextmenu={ev=>openCtxMenu(ev,node.id)}
               on:mouseenter={ev=>onNodeEnter(ev,node.id)} on:mouseleave={onNodeLeave}>
@@ -799,52 +834,22 @@
                 {:else}
                   <span class="node__status node__status--idle" title="Idle"></span>
                 {/if}
-                {#if expandedNodeId === node.id}
-                  <header class="node__header">
-                    <div class="node__icon">
-                      {#if isLogoIcon(node.icon)}
-                        <img class="node__logo" src={appLogo} alt="FinNode"/>
-                      {:else}
-                        {node.icon ?? '◆'}
-                      {/if}
-                    </div>
-                    <div class="node__header-copy">
-                      <div class="node__name">{node.name}</div>
-                      <div class="node__meta">{node.id.slice(0,8)}</div>
-                    </div>
-                    {#if !isLockedNode(node)}
-                      <button class="node__edit-trigger" on:click|stopPropagation={()=>openEditor(node.id)}>Edit</button>
-                    {/if}
-                  </header>
-                  <p class="node__body">{node.description || 'A linked context node'}</p>
-                  {#if hasAnyActions(node)}
-                    <div class="node__actions">
-                      {#if hasAction(node,'open-path')}<button on:click|stopPropagation={()=>launchNode(node,'open-path')}>Folder</button>{/if}
-                      {#if hasAction(node,'open-editor')}<button on:click|stopPropagation={()=>launchNode(node,'open-editor')}>Editor</button>{/if}
-                      {#if hasAction(node,'open-browser')}<button on:click|stopPropagation={()=>launchNode(node,'open-browser')}>Browser</button>{/if}
-                      {#if hasAction(node,'run-script')}<button on:click|stopPropagation={()=>launchNode(node,'run-script')}>Script</button>{/if}
-                    </div>
-                  {/if}
-                  {#if node.macros && node.macros.length > 0}
-                    <button class="node__macro-btn" on:click|stopPropagation={()=>runMacro(node.macros)}>▶ Run Macro ({node.macros.length} steps)</button>
-                  {/if}
-                {:else}
-                  <div class="node__compact-face">
-                    {#if isLogoIcon(node.icon)}
-                      <img class="node__logo" src={appLogo} alt="FinNode"/>
-                    {:else}
-                      <div class="node__compact-icon">{node.icon || '○'}</div>
-                    {/if}
-                    <div class="node__compact-title">{node.name || 'Empty Node'}</div>
-                  </div>
+                {#if !isLockedNode(node)}
+                  <button class="node__edit-trigger node__edit-trigger--floating" on:click|stopPropagation={()=>openEditor(node.id)}>Edit</button>
                 {/if}
+                <div class="node__compact-face">
+                  {#if isLogoIcon(node.icon)}
+                    <img class="node__logo" src={appLogo} alt="FinNode"/>
+                  {:else}
+                    <div class="node__compact-icon">{node.icon || '○'}</div>
+                  {/if}
+                  <div class="node__compact-title">{node.name || 'Empty Node'}</div>
+                </div>
               </div>
             </article>
           {/each}
         </div>
       </div>
-
-      <button class="node-workspace__resize" aria-label="Resize node window" on:pointerdown={beginWorkspaceResize}></button>
     </section>
 
     <!-- Multi-select toolbar -->
@@ -939,7 +944,7 @@
     {/if}
 
     <!-- Tooltip -->
-    {#if hoveredId && !expandedNodeId}
+    {#if hoveredId}
       {@const tn = nodes.find(n=>n.id===hoveredId)}
       {#if tn}
         <div class="tooltip" style="left:{tooltipPos.x}px;top:{tooltipPos.y}px;">{tn.name}{tn.description ? ` — ${tn.description}` : ''}</div>
@@ -1092,8 +1097,8 @@
   .activity-list { display:flex;flex-direction:column;gap:6px;max-height:110px;overflow:auto; }
   .activity-item { font-size:0.76rem;line-height:1.35;color:rgba(233,248,255,0.8);border-bottom:1px dashed rgba(124,244,255,0.16);padding-bottom:6px; }
   .section__title { margin-bottom:10px;text-transform:uppercase;letter-spacing:0.16em;font-size:0.72rem; }
-  .chip,.node__actions button,.node-editor-popup__actions button { border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.78);color:var(--text);border-radius:12px;padding:9px 12px;font:inherit;font-size:0.8rem;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease; }
-  .chip:hover,.node__actions button:hover { transform:translateY(-1px);border-color:rgba(124,244,255,0.45);box-shadow:0 0 18px rgba(124,244,255,0.16); }
+  .chip,.node-editor-popup__actions button { border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.78);color:var(--text);border-radius:12px;padding:9px 12px;font:inherit;font-size:0.8rem;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease; }
+  .chip:hover { transform:translateY(-1px);border-color:rgba(124,244,255,0.45);box-shadow:0 0 18px rgba(124,244,255,0.16); }
   .chip { width:100%;margin-top:4px; }
   .chip--sm { width:auto;padding:6px 10px;font-size:0.74rem; }
   .chip--active { border-color:var(--accent);background:rgba(124,244,255,0.12);color:var(--accent); }
@@ -1101,7 +1106,7 @@
   .chip:disabled { opacity:0.45;cursor:not-allowed; }
   .stage { position:relative;width:100%;height:100%;overflow:hidden;transition:opacity calc(220ms * var(--motion-scale)) ease; }
   .stage--hidden { opacity:0;pointer-events:none; }
-  .node-workspace { position:absolute;display:flex;flex-direction:column;border-radius:22px;border:1px solid rgba(124,244,255,0.26);background:linear-gradient(160deg,rgba(8,15,26,0.88),rgba(9,20,35,0.72));box-shadow:0 30px 70px rgba(0,0,0,0.45),0 0 30px rgba(124,244,255,0.14);backdrop-filter:blur(16px) saturate(120%);overflow:hidden;pointer-events:auto;isolation:isolate; }
+  .node-workspace { position:absolute;display:flex;flex-direction:column;border-radius:22px;border:2px solid rgba(124,244,255,0.3);background:linear-gradient(160deg,rgba(8,15,26,0.88),rgba(9,20,35,0.72));box-shadow:0 30px 70px rgba(0,0,0,0.45),0 0 30px rgba(124,244,255,0.14);backdrop-filter:blur(16px) saturate(120%);overflow:hidden;pointer-events:auto;isolation:isolate; }
   .node-workspace::before { content:'';position:absolute;inset:-40%;background:conic-gradient(from 0deg,rgba(124,244,255,0) 0deg,rgba(124,244,255,0.2) 120deg,rgba(157,255,185,0) 240deg,rgba(124,244,255,0) 360deg);animation:orbital 14s linear infinite;opacity:0.6;z-index:0;pointer-events:none; }
   .node-workspace::after { content:'';position:absolute;inset:0;border-radius:inherit;border:1px solid rgba(255,255,255,0.07);pointer-events:none;z-index:3; }
   .node-workspace__chrome { position:relative;z-index:2;height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 14px;border-bottom:1px solid rgba(124,244,255,0.2);background:linear-gradient(180deg,rgba(15,30,45,0.85),rgba(8,15,26,0.65));cursor:grab;user-select:none; }
@@ -1109,22 +1114,18 @@
   .node-workspace__title { text-transform:uppercase;letter-spacing:0.2em;font-size:0.66rem;color:rgba(218,248,255,0.86); }
   .node-workspace__hint { font-size:0.68rem;color:rgba(200,238,255,0.72);white-space:nowrap; }
   .node-workspace__canvas { position:relative;flex:1;overflow:hidden;z-index:1; }
-  .node-workspace__resize { position:absolute;right:8px;bottom:8px;width:22px;height:22px;border:1px solid rgba(124,244,255,0.45);border-radius:8px;background:linear-gradient(145deg,rgba(124,244,255,0.24),rgba(124,244,255,0.08));box-shadow:0 0 12px rgba(124,244,255,0.24);cursor:nwse-resize;z-index:5; }
-  .node-workspace__resize::before { content:'';position:absolute;right:4px;bottom:4px;width:10px;height:10px;border-right:2px solid rgba(230,252,255,0.85);border-bottom:2px solid rgba(230,252,255,0.85); }
   .links,.node-layer { position:absolute;inset:0; }
   .links { pointer-events:none;z-index:1; }
   .link { fill:none;stroke:var(--line);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:stroke 200ms ease,stroke-width 200ms ease; }
   .link--highlight { stroke:var(--accent);stroke-width:3;filter:drop-shadow(0 0 8px var(--glow)); }
-  .node-layer { padding:20px;pointer-events:none;transform-origin:0 0; }
+  .node-layer { padding:0;pointer-events:none;transform-origin:0 0; }
   .node { position:absolute;width:84px;height:84px;aspect-ratio:1 / 1;border-radius:50%;overflow:hidden;cursor:grab;user-select:none;will-change:left,top;z-index:2;pointer-events:auto;transition:left calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1),top calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1); }
-  .node:not(.node--expanded) { min-height:84px;max-height:84px; }
-  .node:not(.node--expanded) .node__surface,
-  .node:not(.node--expanded) .node__surface::after { border-radius:50%; }
-  .node.node--expanded { width:272px;height:auto;min-height:190px;border-radius:22px;z-index:5; }
+  .node { min-height:84px;max-height:84px; }
+  .node .node__surface,
+  .node .node__surface::after { border-radius:50%; }
   .node--selected .node__surface { border-color:var(--accent) !important;box-shadow:0 0 20px var(--glow),0 12px 28px rgba(0,0,0,0.32) !important; }
   .node__surface { position:relative;width:100%;height:100%;display:grid;place-items:center;padding:12px;border-radius:inherit;background:linear-gradient(180deg,rgba(18,27,41,0.94),rgba(10,15,24,0.82));border:1px solid rgba(var(--nc),0.25);box-shadow:0 12px 28px rgba(0,0,0,0.32),0 0 calc(14px * var(--node-glow)) rgba(var(--nc),calc(0.14 * var(--node-glow))) inset;transition:transform calc(140ms * var(--motion-scale)) ease; }
   .node__surface::after { content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:0 0 calc(10px * var(--node-glow)) rgba(var(--nc),calc(0.1 * var(--node-glow)));pointer-events:none; }
-  .node--expanded .node__surface { display:flex;flex-direction:column;min-height:190px;padding:16px;align-items:stretch; }
   .node__compact-face { display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;max-width:90%; }
   .node__compact-icon { width:24px;height:24px;display:grid;place-items:center;font-size:1rem;color:rgb(var(--nc));text-shadow:0 0 14px rgba(var(--nc),0.55); }
   .node__compact-title { max-width:100%;text-align:center;font-size:0.72rem;font-weight:700;line-height:1.12;color:rgba(233,248,255,0.95);text-shadow:0 0 12px rgba(var(--nc),0.26);overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
@@ -1133,16 +1134,9 @@
   .node__status { position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:50%; }
   .node__status--active { background:#69f0ae;box-shadow:0 0 8px rgba(105,240,174,0.6); }
   .node__status--idle { background:rgba(200,238,255,0.35); }
-  .node__header { display:flex;gap:10px;align-items:center; }
-  .node__header-copy { min-width:0;flex:1; }
-  .node__icon { width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:rgba(var(--nc),0.12);color:rgb(var(--nc));box-shadow:0 0 15px rgba(var(--nc),0.18); }
   .node__logo { width:22px;height:22px;object-fit:contain;filter:drop-shadow(0 0 8px rgba(var(--nc),0.35)); }
   .node__edit-trigger { border:1px solid rgba(var(--nc),0.25);background:rgba(7,14,24,0.86);color:var(--text);border-radius:10px;padding:5px 10px;font:inherit;font-size:0.76rem;cursor:pointer; }
-  .node__name { font-size:1.05rem;font-weight:700; }
-  .node__meta { color:var(--muted);font-size:0.82rem; }
-  .node__body { margin:12px 0;color:rgba(233,248,255,0.82);line-height:1.4;font-size:0.82rem; }
-  .node__actions { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }
-  .node__macro-btn { margin-top:8px;border:1px solid rgba(var(--nc),0.3);background:rgba(var(--nc),0.08);color:rgb(var(--nc));border-radius:10px;padding:7px 10px;font:inherit;font-size:0.74rem;cursor:pointer; }
+  .node__edit-trigger--floating { position:absolute;left:6px;top:6px;padding:3px 7px;font-size:0.66rem;line-height:1;z-index:2; }
   .status-bar { display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-radius:14px;background:rgba(5,9,16,0.58);border:1px solid rgba(124,244,255,0.2);color:var(--muted);font-size:0.82rem; }
   .status-bar--settings { margin-top:auto; }
   .status-dot { width:10px;height:10px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 16px rgba(157,255,185,0.65);animation:pulse 2.4s ease-in-out infinite; }
