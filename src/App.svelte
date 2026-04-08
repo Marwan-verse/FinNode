@@ -772,8 +772,3 @@
 
   @keyframes pulse { 0%,100%{opacity:0.45;transform:scale(0.82);} 50%{opacity:1;transform:scale(1.08);} }
 </style>
-  /* Tooltip */
-  .tooltip { position:fixed;z-index:100;padding:8px 12px;border-radius:10px;background:rgba(8,14,24,0.96);border:1px solid rgba(124,244,255,0.25);color:var(--text);font-size:0.76rem;pointer-events:none;transform:translateX(-50%) translateY(-100%);white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis; }
-
-  @keyframes pulse { 0%,100%{opacity:0.45;transform:scale(0.82);} 50%{opacity:1;transform:scale(1.08);} }
-</style>
