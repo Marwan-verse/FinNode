@@ -4,16 +4,20 @@ use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
   fs,
+  fs::{File, OpenOptions},
   io,
   path::{Path, PathBuf},
   process::Command,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, OnceLock},
   thread,
 };
+use fs2::FileExt;
 use tauri::{
   AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
   SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
 };
+
+static APP_INSTANCE_LOCK: OnceLock<File> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LaunchTargets {
@@ -99,16 +103,7 @@ fn set_stealth_mode(app: AppHandle, window: Window, state: State<'_, AppState>, 
 
 #[tauri::command]
 fn set_desktop_visibility(app: AppHandle, state: State<'_, AppState>, visible: bool) -> Result<(), String> {
-  {
-    let mut desktop_visible = state
-      .desktop_visible
-      .lock()
-      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
-    *desktop_visible = visible;
-  }
-
-  let _ = app.emit_all("desktop-visibility-changed", visible);
-  Ok(())
+  apply_desktop_mode(&app, &state, visible)
 }
 
 #[tauri::command]
@@ -125,9 +120,42 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_settings_view(app: AppHandle) -> Result<(), String> {
-  show_main_window(app.clone())?;
+fn show_settings_view(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+  apply_desktop_mode(&app, &state, false)?;
   let _ = app.emit_all("open-settings-tab", "general");
+  Ok(())
+}
+
+fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: bool) -> Result<(), String> {
+  {
+    let mut desktop_visible = state
+      .desktop_visible
+      .lock()
+      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
+    *desktop_visible = visible;
+  }
+
+  let window = app
+    .get_window("main")
+    .ok_or_else(|| "main window not found".to_string())?;
+
+  window.show().map_err(|err| err.to_string())?;
+
+  if visible {
+    let _ = window.set_decorations(false);
+    let _ = window.set_skip_taskbar(true);
+    let _ = window.set_always_on_top(true);
+    window.set_fullscreen(true).map_err(|err| err.to_string())?;
+  } else {
+    window.set_fullscreen(false).map_err(|err| err.to_string())?;
+    let _ = window.set_always_on_top(false);
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.set_decorations(true);
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+  }
+
+  let _ = app.emit_all("desktop-visibility-changed", visible);
   Ok(())
 }
 
@@ -152,13 +180,19 @@ fn build_system_tray() -> SystemTray {
 }
 
 fn main() {
+  if let Err(error) = ensure_single_instance() {
+    eprintln!("{error}");
+    return;
+  }
+
   tauri::Builder::default()
     .system_tray(build_system_tray())
     .manage(create_state())
     .on_system_tray_event(|app, event| match event {
       SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
         "open-settings" => {
-          let _ = show_settings_view(app.clone());
+          let state = app.state::<AppState>();
+          let _ = show_settings_view(app.clone(), state);
         }
         "toggle-stealth" => {
           let state = app.state::<AppState>();
@@ -192,13 +226,14 @@ fn main() {
             }
           };
 
-          let _ = app.emit_all("desktop-visibility-changed", next_visible);
+          let _ = apply_desktop_mode(&app, &state, next_visible);
         }
         "exit" => app.exit(0),
         _ => {}
       },
       SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
-        let _ = show_settings_view(app.clone());
+        let state = app.state::<AppState>();
+        let _ = show_settings_view(app.clone(), state);
       }
       _ => {}
     })
@@ -238,6 +273,28 @@ fn main() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running FinNode");
+}
+
+fn ensure_single_instance() -> Result<(), String> {
+  let lock_dir = tauri::api::path::config_dir()
+    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    .join("FinNode");
+  fs::create_dir_all(&lock_dir).map_err(|err| err.to_string())?;
+
+  let lock_path = lock_dir.join("app.lock");
+  let file = OpenOptions::new()
+    .read(true)
+    .write(true)
+    .create(true)
+    .open(&lock_path)
+    .map_err(|err| err.to_string())?;
+
+  file
+    .try_lock_exclusive()
+    .map_err(|_| "FinNode is already running. Close the existing app first.".to_string())?;
+
+  let _ = APP_INSTANCE_LOCK.set(file);
+  Ok(())
 }
 
 fn create_state() -> AppState {
@@ -383,14 +440,12 @@ fn update_stealth_mode(app: &AppHandle, window: &Window, state: &State<'_, AppSt
 }
 
 fn apply_stealth_mode(window: &Window, enabled: bool) -> Result<(), String> {
-  window.set_always_on_top(true).map_err(|err| err.to_string())?;
-
   if enabled {
-    window.set_ignore_cursor_events(true).map_err(|err| err.to_string())?;
+    window.hide().map_err(|err| err.to_string())?;
   } else {
-    window.set_ignore_cursor_events(false).map_err(|err| err.to_string())?;
-    let _ = window.show();
-    let _ = window.set_focus();
+    window.show().map_err(|err| err.to_string())?;
+    let _ = window.unminimize();
+    window.set_focus().map_err(|err| err.to_string())?;
   }
 
   Ok(())

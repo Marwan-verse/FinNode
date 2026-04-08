@@ -63,6 +63,13 @@
   let fatalError = '';
   let selectedTemplate = nodeTemplates[0].id;
   let activityLog = [];
+  let contextNode = null;
+  let contextMenu = {
+    open: false,
+    x: 0,
+    y: 0,
+    nodeId: null,
+  };
 
   let nodeLayer;
   let viewBox = '0 0 1 1';
@@ -170,11 +177,14 @@
   $: {
     if (typeof document !== 'undefined') {
       document.body.classList.toggle('is-stealth', stealth);
+      document.body.classList.toggle('desktop-mode', showDesktop);
       document.documentElement.style.setProperty('--motion-scale', String(Math.max(0.4, settings.appearance.motionScale)));
       document.documentElement.style.setProperty('--node-glow', String(Math.max(0.15, settings.appearance.nodeGlow)));
       document.documentElement.style.setProperty('--grid-opacity', settings.appearance.showGrid ? '0.4' : '0');
     }
   }
+
+  $: contextNode = contextMenu.nodeId ? nodes.find((node) => node.id === contextMenu.nodeId) : null;
 
   function nodeRef(element, id) {
     nodeElements.set(id, element);
@@ -274,6 +284,7 @@
   function applyDesktopVisibility(visible, syncBackend = true) {
     const nextVisible = Boolean(visible);
     showDesktop = nextVisible;
+    closeContextMenu();
 
     updateSettings((draft) => {
       draft.nodes.showDesktop = nextVisible;
@@ -287,6 +298,143 @@
     }
 
     queueRenderConnections();
+  }
+
+  function closeContextMenu() {
+    if (!contextMenu.open) {
+      return;
+    }
+
+    contextMenu = {
+      open: false,
+      x: 0,
+      y: 0,
+      nodeId: null,
+    };
+  }
+
+  function openNodeContextMenu(event, nodeId) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const maxX = window.innerWidth - 240;
+    const maxY = window.innerHeight - 250;
+
+    contextMenu = {
+      open: true,
+      x: Math.max(10, Math.min(event.clientX, maxX)),
+      y: Math.max(10, Math.min(event.clientY, maxY)),
+      nodeId,
+    };
+  }
+
+  function addConnectedNodeFromMenu() {
+    const source = contextNode;
+    if (!source) {
+      closeContextMenu();
+      return;
+    }
+
+    const template = nodeTemplates.find((item) => item.id === selectedTemplate) ?? nodeTemplates[0];
+    const node = {
+      id: uniqueNodeId(template.id),
+      name: `${template.name} Node`,
+      icon: template.icon,
+      description: template.description,
+      x: source.x + 260,
+      y: source.y + 30,
+      links: [],
+      targets: {
+        path: '.',
+        editor: '.',
+        browser: template.browser,
+        script: template.script,
+      },
+    };
+
+    nodes = [
+      ...nodes.map((item) => {
+        if (item.id !== source.id) {
+          return item;
+        }
+
+        return {
+          ...item,
+          links: Array.from(new Set([...(item.links ?? []), node.id])),
+        };
+      }),
+      node,
+    ];
+
+    syncSmoothNodes(true);
+    scheduleSave();
+    updateStatus(`Added connected node from ${source.name}`);
+    closeContextMenu();
+  }
+
+  function connectNearestNodeFromMenu() {
+    const source = contextNode;
+    if (!source) {
+      closeContextMenu();
+      return;
+    }
+
+    const candidates = nodes.filter((node) => node.id !== source.id);
+    if (!candidates.length) {
+      updateStatus('No other nodes available to connect');
+      closeContextMenu();
+      return;
+    }
+
+    const nearest = candidates.reduce((best, current) => {
+      const bestDist = (best.x - source.x) ** 2 + (best.y - source.y) ** 2;
+      const currentDist = (current.x - source.x) ** 2 + (current.y - source.y) ** 2;
+      return currentDist < bestDist ? current : best;
+    });
+
+    nodes = nodes.map((node) => {
+      if (node.id !== source.id) {
+        return node;
+      }
+
+      return {
+        ...node,
+        links: Array.from(new Set([...(node.links ?? []), nearest.id])),
+      };
+    });
+
+    scheduleSave();
+    queueRenderConnections();
+    updateStatus(`Connected ${source.name} to ${nearest.name}`);
+    closeContextMenu();
+  }
+
+  function clearNodeLinksFromMenu() {
+    const source = contextNode;
+    if (!source) {
+      closeContextMenu();
+      return;
+    }
+
+    nodes = nodes.map((node) => (node.id === source.id ? { ...node, links: [] } : node));
+    scheduleSave();
+    queueRenderConnections();
+    updateStatus(`Cleared outgoing links from ${source.name}`);
+    closeContextMenu();
+  }
+
+  function cloneNodeFromMenu() {
+    if (contextNode) {
+      cloneNode(contextNode.id);
+    }
+    closeContextMenu();
+  }
+
+  function deleteNodeFromMenu() {
+    if (contextNode) {
+      deleteNode(contextNode.id);
+    }
+    closeContextMenu();
   }
 
   async function bootstrap() {
@@ -334,10 +482,27 @@
     const onResize = () => queueRenderConnections();
     const onMove = (event) => onPointerMove(event);
     const onUp = () => onPointerUp();
+    const onPointerDown = (event) => {
+      if (!(event.target instanceof Element)) {
+        closeContextMenu();
+        return;
+      }
+
+      if (!event.target.closest('.context-menu')) {
+        closeContextMenu();
+      }
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
 
     window.addEventListener('resize', onResize);
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
 
     return () => {
       unlistenStealth();
@@ -347,6 +512,8 @@
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
       if (saveTimer) {
         window.clearTimeout(saveTimer);
       }
@@ -415,6 +582,7 @@
     }
 
     draggingId = id;
+    closeContextMenu();
     const rect = event.currentTarget.getBoundingClientRect();
     dragOffset = {
       x: event.clientX - rect.left,
@@ -503,6 +671,15 @@
     } catch (error) {
       updateStatus(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function openLinkedFolder(node) {
+    if (!node?.targets?.path) {
+      updateStatus(`No linked folder configured for ${node?.name ?? 'node'}`);
+      return;
+    }
+
+    await launchNode(node, 'open-path');
   }
 
   async function toggleStealth() {
@@ -617,6 +794,25 @@
     scheduleSave();
   }
 
+  function setNodeLinkedFolder(id, value) {
+    const trimmed = value.trim();
+    nodes = nodes.map((node) => {
+      if (node.id !== id) {
+        return node;
+      }
+
+      return {
+        ...node,
+        targets: {
+          ...(node.targets ?? {}),
+          path: trimmed || null,
+        },
+      };
+    });
+    scheduleSave();
+    updateStatus('Updated linked folder path');
+  }
+
   function moveNode(id, direction) {
     const index = nodes.findIndex((node) => node.id === id);
     if (index < 0) {
@@ -664,6 +860,10 @@
       return;
     }
 
+    if (contextMenu.nodeId === id) {
+      closeContextMenu();
+    }
+
     nodes = nodes
       .filter((node) => node.id !== id)
       .map((node) => ({
@@ -706,7 +906,7 @@
 {#if fatalError}
   <pre class="fatal">{fatalError}</pre>
 {:else}
-  <div class="hud-shell">
+  <div class="hud-shell" class:desktop-mode={showDesktop}>
     <button
       class="ghost-fin"
       title="Reveal FinNode"
@@ -799,7 +999,14 @@
             {#each nodes as node, index (node.id)}
               <div class="node-row">
                 <input value={node.name} on:change={(event) => renameNode(node.id, event.currentTarget.value)} />
+                  <input
+                    class="node-row__path"
+                    value={node.targets?.path ?? ''}
+                    placeholder="Linked folder path (e.g. /home/user/project)"
+                    on:change={(event) => setNodeLinkedFolder(node.id, event.currentTarget.value)}
+                  />
                 <div class="node-row__actions">
+                    <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
                   <button on:click={() => moveNode(node.id, -1)} disabled={index === 0}>Up</button>
                   <button on:click={() => moveNode(node.id, 1)} disabled={index === nodes.length - 1}>Down</button>
                   <button on:click={() => cloneNode(node.id)}>Clone</button>
@@ -851,6 +1058,7 @@
             use:nodeRef={node.id}
             style={`left:${node.renderX}px;top:${node.renderY}px;`}
             on:pointerdown={(event) => beginDrag(event, node.id)}
+            on:contextmenu={(event) => openNodeContextMenu(event, node.id)}
           >
             <div class="node__surface">
               <header class="node__header">
@@ -862,7 +1070,7 @@
               </header>
               <p class="node__body">{node.description ?? 'A linked context node'}</p>
               <div class="node__actions">
-                <button on:click|stopPropagation={() => launchNode(node, 'open-path')}>Folder</button>
+                <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
                 <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
                 <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
                 <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
@@ -871,6 +1079,24 @@
           </article>
         {/each}
       </div>
+
+      {#if contextMenu.open}
+        <div
+          class="context-menu"
+          style={`left:${contextMenu.x}px;top:${contextMenu.y}px;`}
+          role="menu"
+          tabindex="-1"
+          on:pointerdown|stopPropagation
+          on:contextmenu|preventDefault
+        >
+          <div class="context-menu__title">{contextNode?.name ?? 'Node'}</div>
+          <button on:click={addConnectedNodeFromMenu}>Add Connecting Node</button>
+          <button on:click={connectNearestNodeFromMenu}>Connect Nearest Node</button>
+          <button on:click={clearNodeLinksFromMenu}>Clear Node Links</button>
+          <button on:click={cloneNodeFromMenu}>Clone Node</button>
+          <button class="danger" on:click={deleteNodeFromMenu}>Delete Node</button>
+        </div>
+      {/if}
 
       <div class="status-bar">
         <span>{statusText}</span>
@@ -928,6 +1154,14 @@
     opacity: var(--grid-opacity);
   }
 
+  :global(body.desktop-mode) {
+    background: transparent;
+  }
+
+  :global(body.desktop-mode)::before {
+    opacity: 0;
+  }
+
   :global(body.is-stealth) .rail {
     transform: translateX(-18px);
     opacity: 0.15;
@@ -947,6 +1181,15 @@
     grid-template-columns: 420px 1fr;
     width: 100%;
     height: 100%;
+  }
+
+  .hud-shell.desktop-mode {
+    grid-template-columns: 1fr;
+  }
+
+  .hud-shell.desktop-mode .rail,
+  .hud-shell.desktop-mode .ghost-fin {
+    display: none;
   }
 
   .ghost-fin {
@@ -1084,6 +1327,10 @@
     font: inherit;
   }
 
+  .node-row__path {
+    font-size: 0.8rem;
+  }
+
   .node-manager {
     display: flex;
     flex-direction: column;
@@ -1110,7 +1357,7 @@
 
   .node-row__actions {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 6px;
   }
 
@@ -1313,6 +1560,53 @@
     background: rgba(5, 9, 16, 0.58);
     border: 1px solid rgba(124, 244, 255, 0.16);
     backdrop-filter: blur(18px) saturate(160%);
+  }
+
+  .context-menu {
+    position: fixed;
+    width: 220px;
+    z-index: 120;
+    border: 1px solid rgba(124, 244, 255, 0.28);
+    border-radius: 14px;
+    background: rgba(8, 14, 24, 0.95);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 0 18px rgba(124, 244, 255, 0.15);
+    backdrop-filter: blur(18px);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .context-menu__title {
+    font-size: 0.82rem;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+    padding: 2px 4px 8px;
+    border-bottom: 1px solid rgba(124, 244, 255, 0.14);
+    margin-bottom: 2px;
+  }
+
+  .context-menu button {
+    border: 1px solid rgba(124, 244, 255, 0.2);
+    background: rgba(10, 18, 29, 0.88);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 0.82rem;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+
+  .context-menu button:hover {
+    border-color: rgba(124, 244, 255, 0.42);
+    background: rgba(14, 28, 43, 0.95);
+  }
+
+  .context-menu button.danger {
+    border-color: rgba(255, 143, 163, 0.35);
+    color: #ffd9e1;
   }
 
   .status-dot {

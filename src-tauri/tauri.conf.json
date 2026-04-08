@@ -34,7 +34,7 @@
         "title": "FinNode",
         "width": 460,
         "height": 720,
-        "transparent": false,
+        "transparent": true,
         "decorations": true,
         "alwaysOnTop": false,
         "skipTaskbar": false,
