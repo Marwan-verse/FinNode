@@ -137,6 +137,8 @@ fn hide_main_window(window: Window) -> Result<(), String> {
 #[tauri::command]
 fn show_main_window(app: AppHandle) -> Result<(), String> {
   let window = app.get_window("main").ok_or_else(|| "main window not found".to_string())?;
+  let _ = window.set_decorations(false);
+  let _ = window.set_resizable(false);
   window.show().map_err(|err| err.to_string())?;
   window.unminimize().map_err(|err| err.to_string())?;
   window.set_focus().map_err(|err| err.to_string())
@@ -300,6 +302,7 @@ fn main() {
       }
 
       let _ = window.set_resizable(false);
+      let _ = window.set_decorations(false);
       let state = app.state::<AppState>();
       let layout = read_layout(&state.layout_path).unwrap_or_else(|_| default_layout());
       let _ = write_layout(&state.layout_path, &layout);
