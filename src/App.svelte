@@ -273,7 +273,6 @@
   function openEditorSoon(nid) { expandedNodeId=nid; void tick().then(()=>openEditor(nid)); }
   function openCtxMenu(ev,nid) {
     ev.preventDefault(); ev.stopPropagation();
-    if (isLockedNode(nid)) return;
     closeEditor();
     contextMenu={open:true, x:Math.max(10,Math.min(ev.clientX,innerWidth-240)), y:Math.max(10,Math.min(ev.clientY,innerHeight-300)), nodeId:nid};
     void tick().then(scheduleHitRegions);
@@ -594,11 +593,15 @@
     {#if contextMenu.open && contextNode}
       <div class="context-menu" style="left:{contextMenu.x}px;top:{contextMenu.y}px;" on:pointerdown|stopPropagation>
         <div class="context-menu__title">{contextNode.name}</div>
-        <button on:click={addConnected}>Add Connected Node</button>
-        <button on:click={connectNearest}>Connect Nearest</button>
-        <button on:click={clearLinks}>Clear Links</button>
-        <button on:click={cloneFromMenu}>Clone</button>
-        <button class="danger" on:click={deleteFromMenu}>Delete</button>
+        {#if isLockedNode(contextNode)}
+          <button on:click={()=>{void openSettingsView(); closeCtx();}}>Open Settings</button>
+        {:else}
+          <button on:click={addConnected}>Add Connected Node</button>
+          <button on:click={connectNearest}>Connect Nearest</button>
+          <button on:click={clearLinks}>Clear Links</button>
+          <button on:click={cloneFromMenu}>Clone</button>
+          <button class="danger" on:click={deleteFromMenu}>Delete</button>
+        {/if}
       </div>
     {/if}
 
@@ -743,7 +746,7 @@
   :global(body.is-stealth) .ghost-fin { opacity:1; }
   :global(#app) { width:100%;height:100%; }
 
-  .settings-app { position:relative;display:flex;width:100%;height:100%;min-height:100%; }
+  .settings-app { position:fixed;inset:0;display:flex;width:100%;height:100%;min-height:100vh; }
   .desktop-overlay { position:relative;width:100%;height:100%;background:transparent;pointer-events:none; }
   .settings-head { display:flex;justify-content:space-between;align-items:flex-start;gap:12px; }
   .window-controls { display:flex;gap:8px; }
@@ -752,7 +755,7 @@
   .window-controls__btn--danger { border-color:rgba(255,143,163,0.4);color:#ffd9e1; }
   .ghost-fin { border:0;padding:0;position:fixed;top:0;left:0;width:4px;height:100vh;background:linear-gradient(180deg,transparent,rgba(124,244,255,0.8),transparent);box-shadow:0 0 18px rgba(124,244,255,0.85);opacity:0;transition:opacity 180ms ease;z-index:30; }
   .rail { position:relative;display:flex;flex-direction:column;gap:14px;padding:20px;background:var(--panel-strong);border-right:1px solid rgba(124,244,255,0.2);transition:transform 260ms ease,opacity 260ms ease; }
-  .rail--settings { width:100%;border-right:0;overflow-y:auto;flex:1;min-height:0;height:100%; }
+  .rail--settings { width:100%;border-right:0;overflow-y:auto;flex:1;min-height:100%;height:100%;align-self:stretch; }
   .brand { display:flex;gap:14px;align-items:center; }
   .brand__mark { width:48px;height:48px;display:grid;place-items:center;border-radius:16px;background:rgba(7,14,24,0.9);box-shadow:0 0 18px rgba(0,0,0,0.4); }
   .brand__logo { width:28px;height:28px;object-fit:contain;filter:drop-shadow(0 0 8px rgba(124,244,255,0.3)); }
@@ -796,6 +799,8 @@
   .node-layer { padding:26px;pointer-events:none;transform-origin:0 0; }
   .node { position:absolute;width:84px;height:84px;aspect-ratio:1 / 1;border-radius:50%;overflow:hidden;cursor:grab;user-select:none;will-change:left,top;z-index:2;pointer-events:auto;transition:left calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1),top calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1); }
   .node:not(.node--expanded) { min-height:84px;max-height:84px; }
+  .node:not(.node--expanded) .node__surface,
+  .node:not(.node--expanded) .node__surface::after { border-radius:50%; }
   .node.node--expanded { width:272px;height:auto;min-height:190px;border-radius:22px;z-index:5; }
   .node--selected .node__surface { border-color:var(--accent) !important;box-shadow:0 0 20px var(--glow),0 12px 28px rgba(0,0,0,0.32) !important; }
   .node__surface { position:relative;width:100%;height:100%;display:grid;place-items:center;padding:12px;border-radius:inherit;background:linear-gradient(180deg,rgba(18,27,41,0.94),rgba(10,15,24,0.82));border:1px solid rgba(var(--nc),0.25);box-shadow:0 12px 28px rgba(0,0,0,0.32),0 0 calc(14px * var(--node-glow)) rgba(var(--nc),calc(0.14 * var(--node-glow))) inset;transition:transform calc(140ms * var(--motion-scale)) ease; }
