@@ -144,5 +144,26 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
   cargo build --release --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml
 
 WINDOWS_OUTPUT_DIR="$WINDOWS_TARGET_DIR/x86_64-pc-windows-gnu/release"
-echo "[FinNode] Done. Windows executable is at: $WINDOWS_OUTPUT_DIR/finnode.exe"
-echo "[FinNode] Supporting runtime file: $WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
+WINDOWS_EXE_PATH="$WINDOWS_OUTPUT_DIR/finnode.exe"
+WINDOWS_DLL_PATH="$WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
+
+if [ ! -f "$WINDOWS_EXE_PATH" ]; then
+  echo "[FinNode] Build completed but expected executable was not found at: $WINDOWS_EXE_PATH"
+  exit 1
+fi
+
+WINDOWS_EXPORT_DIR="${FINNODE_WINDOWS_EXPORT_DIR:-$(pwd)/artifacts/windows}"
+mkdir -p "$WINDOWS_EXPORT_DIR"
+
+cp -f "$WINDOWS_EXE_PATH" "$WINDOWS_EXPORT_DIR/finnode.exe"
+if [ -f "$WINDOWS_DLL_PATH" ]; then
+  cp -f "$WINDOWS_DLL_PATH" "$WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+fi
+
+echo "[FinNode] Done. Windows executable is at: $WINDOWS_EXE_PATH"
+echo "[FinNode] Supporting runtime file: $WINDOWS_DLL_PATH"
+echo "[FinNode] Exported artifacts to: $WINDOWS_EXPORT_DIR"
+echo "[FinNode] - $WINDOWS_EXPORT_DIR/finnode.exe"
+if [ -f "$WINDOWS_EXPORT_DIR/WebView2Loader.dll" ]; then
+  echo "[FinNode] - $WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+fi

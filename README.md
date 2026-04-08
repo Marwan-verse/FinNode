@@ -53,4 +53,7 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev
 
 - Layout data is saved to the app config directory as `FinNode/config.json`.
 - Global shortcut is `Alt+S` by default.
-- The Windows build output is `src-tauri/target/x86_64-pc-windows-gnu/release/finnode.exe` with `WebView2Loader.dll` beside it.
+- `./scripts/make-windows-executable.sh` always exports Windows artifacts to `artifacts/windows/`:
+	- `artifacts/windows/finnode.exe`
+	- `artifacts/windows/WebView2Loader.dll`
+- You can override export path with `FINNODE_WINDOWS_EXPORT_DIR=/path/to/output`.
