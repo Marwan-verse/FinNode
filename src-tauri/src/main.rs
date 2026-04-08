@@ -478,50 +478,75 @@ fn set_window_bottom(window: &Window) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<(), String> {
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    let raw = hwnd.0 as isize;
-    let valid: Vec<&HitRegion> = regions
-        .iter()
-        .filter(|r| r.right > r.left && r.bottom > r.top)
-        .collect();
+    use std::sync::mpsc;
 
-    unsafe {
-        let region = if let Some(r) = valid.first() {
-            CreateRectRgn(r.left, r.top, r.right, r.bottom)
-        } else {
-            CreateRectRgn(0, 0, 0, 0)
-        };
-        if region == 0 {
-            return Err("CreateRectRgn failed".into());
-        }
+    let window = window.clone();
+    let regions = regions.to_vec();
+    let (tx, rx) = mpsc::channel();
 
-        for r in valid.iter().skip(1) {
-            let next = CreateRectRgn(r.left, r.top, r.right, r.bottom);
-            if next == 0 {
-                continue;
+    window.run_on_main_thread(move || {
+        let result = (|| -> Result<(), String> {
+            let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+            let raw = hwnd.0 as isize;
+            let valid: Vec<HitRegion> = regions
+                .into_iter()
+                .filter(|r| r.right > r.left && r.bottom > r.top)
+                .collect();
+
+            unsafe {
+                let region = if let Some(r) = valid.first() {
+                    CreateRectRgn(r.left, r.top, r.right, r.bottom)
+                } else {
+                    CreateRectRgn(0, 0, 0, 0)
+                };
+                if region == 0 {
+                    return Err("CreateRectRgn failed".into());
+                }
+
+                for r in valid.iter().skip(1) {
+                    let next = CreateRectRgn(r.left, r.top, r.right, r.bottom);
+                    if next == 0 {
+                        continue;
+                    }
+                    CombineRgn(region, region, next, RGN_OR);
+                    DeleteObject(next);
+                }
+
+                if SetWindowRgn(raw, region, 1) == 0 {
+                    return Err("SetWindowRgn failed".into());
+                }
             }
-            CombineRgn(region, region, next, RGN_OR);
-            DeleteObject(next);
-        }
 
-        if SetWindowRgn(raw, region, 1) == 0 {
-            return Err("SetWindowRgn failed".into());
-        }
-    }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
 
-    Ok(())
+    rx.recv().unwrap_or_else(|_| Err("failed to update hit regions".into()))
 }
 
 #[cfg(target_os = "windows")]
 fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    let raw = hwnd.0 as isize;
-    unsafe {
-        if SetWindowRgn(raw, 0, 1) == 0 {
-            return Err("SetWindowRgn failed".into());
-        }
-    }
-    Ok(())
+    use std::sync::mpsc;
+
+    let window = window.clone();
+    let (tx, rx) = mpsc::channel();
+
+    window.run_on_main_thread(move || {
+        let result = (|| -> Result<(), String> {
+            let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+            let raw = hwnd.0 as isize;
+            unsafe {
+                if SetWindowRgn(raw, 0, 1) == 0 {
+                    return Err("SetWindowRgn failed".into());
+                }
+            }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+
+    rx.recv().unwrap_or_else(|_| Err("failed to clear hit regions".into()))
 }
 
 #[cfg(target_os = "linux")]
