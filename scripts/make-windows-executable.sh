@@ -160,10 +160,17 @@ if [ -f "$WINDOWS_DLL_PATH" ]; then
   cp -f "$WINDOWS_DLL_PATH" "$WINDOWS_EXPORT_DIR/WebView2Loader.dll"
 fi
 
-echo "[FinNode] Done. Windows executable is at: $WINDOWS_EXE_PATH"
-echo "[FinNode] Supporting runtime file: $WINDOWS_DLL_PATH"
-echo "[FinNode] Exported artifacts to: $WINDOWS_EXPORT_DIR"
-echo "[FinNode] - $WINDOWS_EXPORT_DIR/finnode.exe"
+echo "[FinNode] Internal build output: $WINDOWS_EXE_PATH"
+echo "[FinNode] Supporting runtime file (internal): $WINDOWS_DLL_PATH"
+echo "[FinNode] Final exported artifacts: $WINDOWS_EXPORT_DIR"
+echo "[FinNode] USE THIS FILE: $WINDOWS_EXPORT_DIR/finnode.exe"
 if [ -f "$WINDOWS_EXPORT_DIR/WebView2Loader.dll" ]; then
-  echo "[FinNode] - $WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+  echo "[FinNode] Runtime DLL: $WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+fi
+
+if command -v wslpath >/dev/null 2>&1; then
+  export_exe_windows_path="$(wslpath -w "$WINDOWS_EXPORT_DIR/finnode.exe" 2>/dev/null || true)"
+  if [ -n "$export_exe_windows_path" ]; then
+    echo "[FinNode] Windows path: $export_exe_windows_path"
+  fi
 fi

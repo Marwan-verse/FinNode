@@ -115,6 +115,7 @@
       nodes: {
         showDesktop: false,
         smoothness: 0.2,
+        clickThrough: true,
       },
       tray: {
         leftClickAction: 'open-settings',
@@ -187,10 +188,11 @@
     const smoothMap = new Map(smoothNodes.map((item) => [item.id, item]));
     renderNodes = nodes.map((node) => {
       const smooth = smoothMap.get(node.id);
+      const useRawPosition = draggingId === node.id;
       return {
         ...node,
-        renderX: smooth ? smooth.x : node.x,
-        renderY: smooth ? smooth.y : node.y,
+        renderX: useRawPosition ? node.x : (smooth ? smooth.x : node.x),
+        renderY: useRawPosition ? node.y : (smooth ? smooth.y : node.y),
       };
     });
   }
@@ -201,6 +203,8 @@
 
   $: {
     if (typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
+      document.documentElement.classList.toggle('settings-app-window', !isDesktopWindow);
       document.body.classList.toggle('is-stealth', stealth);
       document.body.classList.toggle('desktop-mode', isDesktopWindow);
       document.body.classList.toggle('desktop-overlay-window', isDesktopWindow);
@@ -306,6 +310,25 @@
       await invoke('set_desktop_visibility', { visible });
     } catch (error) {
       updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function syncDesktopClickThroughWithBackend(enabled) {
+    try {
+      await invoke('set_desktop_click_through', { enabled });
+    } catch (error) {
+      updateStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function updateDesktopClickThrough(enabled, syncBackend = true) {
+    const nextEnabled = Boolean(enabled);
+    updateSettings((draft) => {
+      draft.nodes.clickThrough = nextEnabled;
+    });
+
+    if (syncBackend) {
+      void syncDesktopClickThroughWithBackend(nextEnabled);
     }
   }
 
@@ -597,6 +620,14 @@
       updateStatus(`Desktop nodes ${Boolean(payload) ? 'shown' : 'hidden'} from tray`);
     });
 
+    const unlistenClickThrough = await listen('desktop-click-through-changed', ({ payload }) => {
+      const enabled = Boolean(payload);
+      updateSettings((draft) => {
+        draft.nodes.clickThrough = enabled;
+      });
+      updateStatus(`Desktop click-through ${enabled ? 'enabled' : 'disabled'}`);
+    });
+
     const unlistenOpenSettings = await listen('open-settings-tab', ({ payload }) => {
       if (isDesktopWindow) {
         return;
@@ -619,6 +650,7 @@
       }
 
       await syncDesktopVisibilityWithBackend(showDesktop);
+      await syncDesktopClickThroughWithBackend(settings.nodes.clickThrough);
     }
 
     updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
@@ -663,6 +695,7 @@
       unlistenStealth();
       unlistenLayout();
       unlistenDesktop();
+      unlistenClickThrough();
       unlistenOpenSettings();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pointermove', onMove);
@@ -795,8 +828,7 @@
       node.x = pointer.x - layerRect.left - dragOffset.x;
       node.y = pointer.y - layerRect.top - dragOffset.y;
       nodes = [...nodes];
-      startNodeSpring();
-      scheduleSave();
+      queueRenderConnections();
     });
   }
 
@@ -819,6 +851,11 @@
     }
 
     draggingId = null;
+
+    if (dragMoved) {
+      syncSmoothNodes(true);
+      scheduleSave();
+    }
 
     if (!dragMoved) {
       toggleNodeExpanded(releasedNodeId);
@@ -843,6 +880,39 @@
     recordActivity(text);
   }
 
+  function hasTextValue(value) {
+    return typeof value === 'string' ? value.trim().length > 0 : false;
+  }
+
+  function hasNodeAction(node, action) {
+    const targets = node?.targets ?? {};
+
+    if (action === 'open-path') {
+      return hasTextValue(targets.path);
+    }
+
+    if (action === 'open-editor') {
+      return hasTextValue(targets.editor) || hasTextValue(targets.path);
+    }
+
+    if (action === 'open-browser') {
+      return hasTextValue(targets.browser);
+    }
+
+    if (action === 'run-script') {
+      return hasTextValue(targets.script);
+    }
+
+    return false;
+  }
+
+  function hasAnyNodeActions(node) {
+    return hasNodeAction(node, 'open-path')
+      || hasNodeAction(node, 'open-editor')
+      || hasNodeAction(node, 'open-browser')
+      || hasNodeAction(node, 'run-script');
+  }
+
   async function launchNode(node, action) {
     try {
       await invoke('launch_node', { node, action });
@@ -853,7 +923,7 @@
   }
 
   async function openLinkedFolder(node) {
-    if (!node?.targets?.path) {
+    if (!hasTextValue(node?.targets?.path)) {
       updateStatus(`No linked folder configured for ${node?.name ?? 'node'}`);
       return;
     }
@@ -1027,7 +1097,6 @@
     };
 
     nodes = [...nodes, clone];
-    expandedNodeId = clone.id;
     syncSmoothNodes(true);
     scheduleSave();
     updateStatus(`Cloned node ${node.name}`);
@@ -1123,12 +1192,24 @@
                 <button class="node__edit-trigger" data-open-editor on:click|stopPropagation={() => openNodeEditor(node.id)}>Edit</button>
               </header>
               <p class="node__body">{node.description ?? 'A linked context node'}</p>
-              <div class="node__actions">
-                <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
-                <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
-              </div>
+              {#if hasAnyNodeActions(node)}
+                <div class="node__actions">
+                  {#if hasNodeAction(node, 'open-path')}
+                    <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
+                  {/if}
+                  {#if hasNodeAction(node, 'open-editor')}
+                    <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
+                  {/if}
+                  {#if hasNodeAction(node, 'open-browser')}
+                    <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
+                  {/if}
+                  {#if hasNodeAction(node, 'run-script')}
+                    <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
+                  {/if}
+                </div>
+              {:else}
+                <div class="node__empty-actions">No launch actions configured.</div>
+              {/if}
             {:else}
               <div class="node__compact-title">{node.name}</div>
             {/if}
@@ -1293,10 +1374,19 @@
         {:else if activeTab === 'nodes'}
           <div class="section__title">Desktop Nodes</div>
           <button class="chip" on:click={toggleDesktop}>{showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}</button>
+          <label class="toggle-row">
+            <span>Desktop click-through</span>
+            <input
+              type="checkbox"
+              checked={settings.nodes.clickThrough}
+              on:change={(event) => updateDesktopClickThrough(event.currentTarget.checked)}
+            />
+          </label>
           <label class="slider-row">
             <span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span>
             <input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={(event) => updateSmoothness(event.currentTarget.value)} />
           </label>
+          <div class="hint">Enable click-through to click desktop icons and other apps behind the overlay.</div>
 
           <div class="section__title node-manager__title">Node Manager</div>
           <div class="template-row">
@@ -1407,6 +1497,7 @@
     opacity: var(--grid-opacity);
   }
 
+  :global(html.desktop-overlay-window),
   :global(body.desktop-overlay-window) {
     background: transparent;
   }
@@ -1742,7 +1833,7 @@
     stroke: var(--line);
     stroke-width: 2;
     stroke-linecap: round;
-    filter: drop-shadow(0 0 8px rgba(124, 244, 255, 0.2));
+    filter: none;
   }
 
   .node-layer {
@@ -1779,9 +1870,9 @@
     border-radius: inherit;
     background: linear-gradient(180deg, rgba(18, 27, 41, 0.94), rgba(10, 15, 24, 0.82));
     border: 1px solid rgba(124, 244, 255, 0.2);
-    box-shadow: var(--shadow), 0 0 calc(30px * var(--node-glow)) rgba(124, 244, 255, calc(0.2 * var(--node-glow))) inset;
-    backdrop-filter: blur(20px) saturate(150%);
-    animation: drift calc(18s * var(--motion-scale)) ease-in-out infinite;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), 0 0 calc(14px * var(--node-glow)) rgba(124, 244, 255, calc(0.14 * var(--node-glow))) inset;
+    backdrop-filter: none;
+    animation: none;
     transition: transform calc(140ms * var(--motion-scale)) ease, box-shadow calc(140ms * var(--motion-scale)) ease;
     will-change: transform;
   }
@@ -1791,7 +1882,7 @@
     position: absolute;
     inset: 0;
     border-radius: inherit;
-    box-shadow: 0 0 calc(24px * var(--node-glow)) rgba(124, 244, 255, calc(0.14 * var(--node-glow)));
+    box-shadow: 0 0 calc(10px * var(--node-glow)) rgba(124, 244, 255, calc(0.1 * var(--node-glow)));
     pointer-events: none;
   }
 
@@ -1883,6 +1974,13 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+  }
+
+  .node__empty-actions {
+    margin-top: auto;
+    font-size: 0.74rem;
+    color: var(--muted);
+    opacity: 0.85;
   }
 
   .status-bar {

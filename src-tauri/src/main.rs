@@ -49,6 +49,7 @@ struct AppState {
   cached_layout: Arc<Mutex<ProjectLayout>>,
   stealth: Arc<Mutex<bool>>,
   desktop_visible: Arc<Mutex<bool>>,
+  desktop_click_through: Arc<Mutex<bool>>,
 }
 
 #[tauri::command]
@@ -107,6 +108,28 @@ fn set_desktop_visibility(app: AppHandle, state: State<'_, AppState>, visible: b
 }
 
 #[tauri::command]
+fn set_desktop_click_through(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+  update_desktop_click_through(&app, &state, enabled)
+}
+
+fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
+  {
+    let mut click_through = state
+      .desktop_click_through
+      .lock()
+      .map_err(|_| "desktop click-through lock poisoned".to_string())?;
+    *click_through = enabled;
+  }
+
+  if let Some(desktop) = app.get_window("desktop") {
+    apply_desktop_click_through(&desktop, enabled)?;
+  }
+
+  let _ = app.emit_all("desktop-click-through-changed", enabled);
+  Ok(())
+}
+
+#[tauri::command]
 fn hide_main_window(window: Window) -> Result<(), String> {
   window.hide().map_err(|err| err.to_string())
 }
@@ -142,17 +165,29 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
   if visible {
     let _ = desktop.set_decorations(false);
     let _ = desktop.set_skip_taskbar(true);
-    let _ = desktop.set_always_on_top(true);
+    let _ = desktop.set_always_on_top(false);
     let _ = desktop.set_resizable(false);
     desktop.show().map_err(|err| err.to_string())?;
     let _ = desktop.unminimize();
     desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
+
+    let click_through_enabled = *state
+      .desktop_click_through
+      .lock()
+      .map_err(|_| "desktop click-through lock poisoned".to_string())?;
+    apply_desktop_click_through(&desktop, click_through_enabled)?;
   } else {
+    let _ = apply_desktop_click_through(&desktop, false);
     let _ = desktop.set_fullscreen(false);
     let _ = desktop.hide();
   }
 
   let _ = app.emit_all("desktop-visibility-changed", visible);
+  Ok(())
+}
+
+fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), String> {
+  window.set_ignore_cursor_events(enabled).map_err(|err| err.to_string())?;
   Ok(())
 }
 
@@ -165,11 +200,13 @@ fn build_system_tray() -> SystemTray {
   let open_item = CustomMenuItem::new("open-settings", "Open Settings");
   let stealth_item = CustomMenuItem::new("toggle-stealth", "Toggle Stealth");
   let desktop_item = CustomMenuItem::new("toggle-desktop", "Show/Hide Desktop Nodes");
+  let click_through_item = CustomMenuItem::new("toggle-click-through", "Toggle Desktop Click-Through");
   let exit_item = CustomMenuItem::new("exit", "Exit");
   let tray_menu = SystemTrayMenu::new()
     .add_item(open_item)
     .add_item(stealth_item)
     .add_item(desktop_item)
+    .add_item(click_through_item)
     .add_native_item(SystemTrayMenuItem::Separator)
     .add_item(exit_item);
 
@@ -220,6 +257,18 @@ fn main() {
 
           let _ = apply_desktop_mode(&app, &state, next_visible);
         }
+        "toggle-click-through" => {
+          let state = app.state::<AppState>();
+          let next_enabled = match state.desktop_click_through.lock() {
+            Ok(click_through) => !*click_through,
+            Err(_) => {
+              eprintln!("failed to toggle desktop click-through from tray: lock poisoned");
+              return;
+            }
+          };
+
+          let _ = update_desktop_click_through(&app, &state, next_enabled);
+        }
         "exit" => app.exit(0),
         _ => {}
       },
@@ -268,6 +317,7 @@ fn main() {
       launch_node,
       set_stealth_mode,
       set_desktop_visibility,
+      set_desktop_click_through,
       hide_main_window,
       show_main_window,
       show_settings_view,
@@ -311,14 +361,18 @@ fn create_state() -> AppState {
     cached_layout: Arc::new(Mutex::new(ProjectLayout::default())),
     stealth: Arc::new(Mutex::new(false)),
     desktop_visible: Arc::new(Mutex::new(false)),
+    desktop_click_through: Arc::new(Mutex::new(false)),
   }
 }
 
 fn register_shortcuts(app: AppHandle) -> Result<(), String> {
-  let shortcut = "Alt+S";
+  let stealth_shortcut = "Alt+S";
+  let click_through_shortcut = "Alt+I";
+  let app_for_stealth = app.clone();
+
   app.global_shortcut_manager()
-    .register(shortcut, move || {
-      let state = app.state::<AppState>();
+    .register(stealth_shortcut, move || {
+      let state = app_for_stealth.state::<AppState>();
       let next_enabled = match state.stealth.lock() {
         Ok(mut stealth) => {
           *stealth = !*stealth;
@@ -330,9 +384,27 @@ fn register_shortcuts(app: AppHandle) -> Result<(), String> {
         }
       };
 
-      if let Err(error) = update_stealth_mode(&app, &state, next_enabled) {
+      if let Err(error) = update_stealth_mode(&app_for_stealth, &state, next_enabled) {
         eprintln!("failed to update stealth mode: {error}");
         return;
+      }
+    })
+    .map_err(|err| err.to_string())?;
+
+  let app_for_click_through = app.clone();
+  app.global_shortcut_manager()
+    .register(click_through_shortcut, move || {
+      let state = app_for_click_through.state::<AppState>();
+      let next_enabled = match state.desktop_click_through.lock() {
+        Ok(click_through) => !*click_through,
+        Err(_) => {
+          eprintln!("failed to toggle desktop click-through: lock poisoned");
+          return;
+        }
+      };
+
+      if let Err(error) = update_desktop_click_through(&app_for_click_through, &state, next_enabled) {
+        eprintln!("failed to update desktop click-through: {error}");
       }
     })
     .map_err(|err| err.to_string())
@@ -459,6 +531,12 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
       desktop.show().map_err(|err| err.to_string())?;
       let _ = desktop.unminimize();
       desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
+
+      let click_through_enabled = *state
+        .desktop_click_through
+        .lock()
+        .map_err(|_| "desktop click-through lock poisoned".to_string())?;
+      apply_desktop_click_through(&desktop, click_through_enabled)?;
     }
   }
 
