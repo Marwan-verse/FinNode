@@ -26,10 +26,20 @@ extern "system" {
     fn SetWindowPos(hwnd: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
     fn SetWindowLongW(hwnd: isize, index: i32, new_long: i32) -> i32;
+    fn SystemParametersInfoW(ui_action: u32, ui_param: u32, pv_param: *mut Rect, f_win_ini: u32) -> i32;
     fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
     fn CombineRgn(dest: isize, src1: isize, src2: isize, mode: i32) -> i32;
     fn DeleteObject(obj: isize) -> i32;
     fn SetWindowRgn(hwnd: isize, hrgn: isize, redraw: i32) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
 }
 
 #[cfg(target_os = "windows")]
@@ -48,6 +58,8 @@ const WS_EX_TOOLWINDOW: i32 = 0x00000080;
 const WS_EX_APPWINDOW: i32 = 0x00040000;
 #[cfg(target_os = "windows")]
 const RGN_OR: i32 = 2;
+#[cfg(target_os = "windows")]
+const SPI_GETWORKAREA: u32 = 0x0030;
 
 // ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -459,7 +471,7 @@ fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<()
         .collect();
 
     unsafe {
-        let mut region = if let Some(r) = valid.first() {
+        let region = if let Some(r) = valid.first() {
             CreateRectRgn(r.left, r.top, r.right, r.bottom)
         } else {
             CreateRectRgn(0, 0, 0, 0)
