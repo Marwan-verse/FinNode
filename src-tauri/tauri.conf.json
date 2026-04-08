@@ -10,6 +10,10 @@
     "version": "0.2.0"
   },
   "tauri": {
+    "systemTray": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false
+    },
     "allowlist": {
       "all": false,
       "shell": {
@@ -28,16 +32,28 @@
     "windows": [
       {
         "label": "main",
-        "title": "FinNode Overlay",
+        "title": "FinNode",
+        "width": 460,
+        "height": 720,
+        "transparent": false,
+        "decorations": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": false,
+        "visible": true,
+        "center": true
+      },
+      {
+        "label": "desktop",
+        "title": "FinNode Desktop",
         "width": 1920,
         "height": 1080,
         "transparent": true,
         "decorations": false,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "skipTaskbar": true,
         "resizable": false,
-        "fullscreen": true,
-        "visible": true,
+        "visible": false,
         "center": false
       }
     ]

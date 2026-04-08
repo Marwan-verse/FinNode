@@ -1,70 +1,59 @@
-# FinNode Overlay
+# FinNode
 
-FinNode Overlay is a lightweight Rust + Tauri desktop overlay with a JavaScript/Svelte UI.
+FinNode is a Tauri HUD for desktop project nodes.
 
-The app is designed for always-on desktop use:
+## What it does
 
-- Transparent fullscreen overlay window.
-- Glowing draggable nodes with animated links.
-- Rust-native command and macro execution.
-- Click-through mode for zero-interference background behavior.
+- Transparent, borderless HUD shell with a frosted-glass layout.
+- Rust backend for global shortcuts, layout persistence, and OS launches.
+- Frontend canvas/svg node links with draggable project nodes.
+- A `make` path that bundles the app through Tauri.
 
-## Architecture
+## Run locally
 
-### Frontend (Svelte)
-
-- Renders nodes, links, and overlay controls.
-- Handles drag interactions and local node persistence.
-- Sends command and macro requests to Rust through Tauri invoke.
-
-### Backend (Rust)
-
-- Executes shell commands efficiently (`bash`, `powershell`, `cmd`, `zsh`).
-- Runs macro step chains in a background thread.
-- Toggles click-through with `set_ignore_cursor_events`.
-- Exposes visibility and platform commands for UI state.
-
-## Hotkeys
-
-- `Alt+Shift+O`: Toggle click-through.
-- `Alt+Shift+H`: Toggle overlay visibility.
-
-## Local Development
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-2. Run frontend development server:
-
-```bash
-npm run dev
-```
-
-3. Run desktop shell:
-
-```bash
-npm run dev:desktop
-```
+1. Install dependencies with `npm install`.
+2. Start the web UI with `npm run dev`.
+3. Start the desktop shell with `npm run dev:desktop` (auto-installs missing apt dependencies on Linux when needed).
 
 ## Build
 
-- Web assets:
+- Web assets: `npm run build:web`
+- Desktop bundle: `npm run build:exe`
+- Same bundle shortcut: `npm run make`
+- One-command executable maker: `./scripts/make-executable.sh`
+- Windows executable from Linux: `npm run make:windows`
+- Windows executable helper: `./scripts/make-windows-executable.sh`
+
+### Linux desktop prerequisites
+
+`npm run build:exe` now attempts to install missing Linux dependencies automatically on apt-based systems.
+
+If you want to install them manually (or if your distro is not apt-based), use:
 
 ```bash
-npm run build:web
+sudo apt-get update
+sudo apt-get install -y \
+	pkg-config \
+	libgtk-3-dev \
+	libayatana-appindicator3-dev \
+	librsvg2-dev \
+	libsoup2.4-dev \
+	patchelf
+
+# Ubuntu 20.04/22.04
+sudo apt-get install -y libwebkit2gtk-4.0-dev
+
+# Ubuntu 24.04+
+sudo apt-get install -y libwebkit2gtk-4.1-dev
 ```
 
-- Desktop bundle:
+`npm run build:windows` also auto-installs `gcc-mingw-w64-x86-64` on apt-based Linux when missing.
 
-```bash
-npm run build:exe
-```
+## Notes
 
-- Windows bundle helper:
-
-```bash
-npm run make:windows
-```
+- Layout data is saved to the app config directory as `FinNode/config.json`.
+- Global shortcut is `Alt+S` by default.
+- `./scripts/make-windows-executable.sh` always exports Windows artifacts to `artifacts/windows/`:
+	- `artifacts/windows/finnode.exe`
+	- `artifacts/windows/WebView2Loader.dll`
+- You can override export path with `FINNODE_WINDOWS_EXPORT_DIR=/path/to/output`.
