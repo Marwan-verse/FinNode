@@ -9,6 +9,43 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+resolve_windows_target_dir() {
+  if [ -n "${FINNODE_WINDOWS_TARGET_DIR:-}" ]; then
+    echo "${FINNODE_WINDOWS_TARGET_DIR}"
+    return
+  fi
+
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    echo "${CARGO_TARGET_DIR}"
+    return
+  fi
+
+  local repo_root
+  repo_root="$(pwd)"
+
+  # WSL/NTFS mounts can fail while creating tauri resource.lib; build in a Linux-local cache.
+  if [[ "$repo_root" == /mnt/* ]]; then
+    echo "$HOME/.cache/finnode/windows-target"
+    return
+  fi
+
+  echo "$repo_root/src-tauri/target"
+}
+
+ensure_writable_dir() {
+  local dir="$1"
+  mkdir -p "$dir"
+
+  if [ ! -w "$dir" ]; then
+    cat <<EOF
+[FinNode] Target directory is not writable: $dir
+[FinNode] Set a writable directory and retry, for example:
+  FINNODE_WINDOWS_TARGET_DIR="$HOME/.cache/finnode/windows-target" bash ./scripts/make-windows-executable.sh
+EOF
+    exit 1
+  fi
+}
+
 run_privileged() {
   if command -v sudo >/dev/null 2>&1; then
     sudo "$@"
@@ -94,9 +131,18 @@ fi
 
 echo "[FinNode] Web assets built. Starting Rust Windows compile (this can take several minutes on first run)..."
 
+WINDOWS_TARGET_DIR="$(resolve_windows_target_dir)"
+ensure_writable_dir "$WINDOWS_TARGET_DIR"
+
+if [ "$WINDOWS_TARGET_DIR" != "$(pwd)/src-tauri/target" ]; then
+  echo "[FinNode] Using CARGO_TARGET_DIR=$WINDOWS_TARGET_DIR"
+fi
+
 echo "[FinNode] Building Windows executable..."
 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
   cargo build --release --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml
 
-echo "[FinNode] Done. Windows executable is at: src-tauri/target/x86_64-pc-windows-gnu/release/finnode.exe"
-echo "[FinNode] Supporting runtime file: src-tauri/target/x86_64-pc-windows-gnu/release/WebView2Loader.dll"
+WINDOWS_OUTPUT_DIR="$WINDOWS_TARGET_DIR/x86_64-pc-windows-gnu/release"
+echo "[FinNode] Done. Windows executable is at: $WINDOWS_OUTPUT_DIR/finnode.exe"
+echo "[FinNode] Supporting runtime file: $WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
