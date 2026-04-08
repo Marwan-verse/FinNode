@@ -4,1219 +4,401 @@
   import { listen } from '@tauri-apps/api/event';
   import { appWindow } from '@tauri-apps/api/window';
 
-  const SETTINGS_KEY = 'finnode.settings.v1';
+  const SETTINGS_KEY = 'finnode.settings.v2';
+  const THEMES = {
+    dark: { bg:'#081321', panel:'rgba(9,18,31,0.88)', line:'rgba(120,227,255,0.25)', text:'#e8f7ff', muted:'rgba(200,238,255,0.72)', glow:'rgba(124,244,255,0.45)', accent:'#7cf4ff', accent2:'#9dffb9', danger:'#ff8fa3', bodyBg:'linear-gradient(145deg,#050b14 0%,#0a1628 55%,#050b14 100%)' },
+    light: { bg:'#f0f4f8', panel:'rgba(255,255,255,0.92)', line:'rgba(30,80,120,0.25)', text:'#1a2a3a', muted:'rgba(40,60,80,0.65)', glow:'rgba(30,120,200,0.35)', accent:'#1e88e5', accent2:'#43a047', danger:'#e53935', bodyBg:'linear-gradient(145deg,#e8eef4 0%,#f5f7fa 55%,#e8eef4 100%)' },
+    midnight: { bg:'#0a0020', panel:'rgba(15,5,40,0.92)', line:'rgba(160,100,255,0.25)', text:'#e8e0ff', muted:'rgba(200,180,255,0.7)', glow:'rgba(160,100,255,0.45)', accent:'#b388ff', accent2:'#ea80fc', danger:'#ff5252', bodyBg:'linear-gradient(145deg,#0a0020 0%,#15083a 55%,#0a0020 100%)' },
+    forest: { bg:'#041a0a', panel:'rgba(5,25,12,0.92)', line:'rgba(100,230,140,0.25)', text:'#e0ffe8', muted:'rgba(180,255,200,0.7)', glow:'rgba(100,230,140,0.45)', accent:'#69f0ae', accent2:'#b9f6ca', danger:'#ff8a80', bodyBg:'linear-gradient(145deg,#041a0a 0%,#082a14 55%,#041a0a 100%)' }
+  };
+  const NODE_COLORS = ['cyan','green','purple','orange','pink','red','blue','yellow'];
+  const COLOR_MAP = { cyan:'124,244,255', green:'100,230,140', purple:'160,100,255', orange:'255,170,50', pink:'255,100,180', red:'255,80,80', blue:'80,140,255', yellow:'255,220,60' };
   const settingsTabs = [
-    { id: 'general', label: 'General' },
-    { id: 'appearance', label: 'Appearance' },
-    { id: 'nodes', label: 'Nodes' },
-    { id: 'tray', label: 'Tray' },
-    { id: 'shortcuts', label: 'Shortcuts' },
+    { id:'general', label:'General' }, { id:'appearance', label:'Appearance' },
+    { id:'nodes', label:'Nodes' }, { id:'tray', label:'Tray' },
+    { id:'shortcuts', label:'Shortcuts' }, { id:'history', label:'History' }
   ];
-
   const nodeTemplates = [
-    {
-      id: 'web-project',
-      name: 'Web Project',
-      icon: '◈',
-      description: 'Frontend app + docs + browser',
-      browser: 'https://vite.dev',
-      script: 'npm run dev',
-    },
-    {
-      id: 'rust-app',
-      name: 'Rust App',
-      icon: '⬡',
-      description: 'Cargo workflow and crates links',
-      browser: 'https://crates.io',
-      script: 'cargo check',
-    },
-    {
-      id: 'docs-hub',
-      name: 'Documentation Hub',
-      icon: '⟡',
-      description: 'Notes, references, and quick links',
-      browser: 'https://doc.rust-lang.org',
-      script: 'npm run build:web',
-    },
-    {
-      id: 'research-stack',
-      name: 'Research Stack',
-      icon: '⟁',
-      description: 'Context, ideas, and experiments',
-      browser: 'https://github.com/trending',
-      script: 'npm run build:web',
-    },
+    { id:'web-project', name:'Web Project', icon:'◈', description:'Frontend app + docs + browser', browser:'https://vite.dev', script:'npm run dev' },
+    { id:'rust-app', name:'Rust App', icon:'⬡', description:'Cargo workflow and crates links', browser:'https://crates.io', script:'cargo check' },
+    { id:'docs-hub', name:'Documentation Hub', icon:'⟡', description:'Notes, references, and quick links', browser:'https://doc.rust-lang.org', script:'npm run build:web' },
+    { id:'research-stack', name:'Research Stack', icon:'⟁', description:'Context, ideas, and experiments', browser:'https://github.com/trending', script:'npm run build:web' }
   ];
 
-  let nodes = [];
-  let renderNodes = [];
-  let smoothNodes = [];
-  let stealth = false;
-  let showDesktop = false;
-  let activeTab = 'general';
-  let draggingId = null;
-  let dragOffset = { x: 0, y: 0 };
-  let pendingPointer = null;
-  let dragFrame = null;
-  let nodeSpringFrame = null;
-  let saveTimer = null;
-  let statusText = 'Loading layout...';
-  let fatalError = '';
+  let nodes = [], renderNodes = [], smoothNodes = [], links = [];
+  let stealth = false, showDesktop = true, activeTab = 'general';
+  let draggingId = null, dragOffset = {x:0,y:0}, pendingPointer = null;
+  let dragFrame = null, nodeSpringFrame = null, saveTimer = null;
+  let statusText = 'Loading...', fatalError = '';
   let selectedTemplate = nodeTemplates[0].id;
-  let activityLog = [];
-  let currentWindowLabel = 'main';
-  let isDesktopWindow = false;
-  let expandedNodeId = null;
-  let dragMoved = false;
-  let dragStart = { x: 0, y: 0 };
-  let editPopup = {
-    open: false,
-    x: 0,
-    y: 0,
-    nodeId: null,
-  };
-  let editDraft = {
-    name: '',
-    description: '',
-    path: '',
-    browser: '',
-    script: '',
-  };
-  let editSelectedLinks = [];
-  let editNode = null;
-  let contextNode = null;
-  let contextMenu = {
-    open: false,
-    x: 0,
-    y: 0,
-    nodeId: null,
-  };
-
-  let nodeLayer;
-  let viewBox = '0 0 1 1';
-  let links = [];
-
+  let activityLog = [], currentWindowLabel = 'main', isDesktopWindow = false;
+  let expandedNodeId = null, dragMoved = false, dragStart = {x:0,y:0};
+  let editPopup = {open:false,x:0,y:0,nodeId:null};
+  let editDraft = {name:'',description:'',path:'',browser:'',script:'',color:'cyan',macros:[]};
+  let editSelectedLinks = [], editNode = null, contextNode = null;
+  let contextMenu = {open:false,x:0,y:0,nodeId:null};
+  let nodeLayer, viewBox = '0 0 1 1';
   const nodeElements = new Map();
+
+  // Workspaces
+  let workspaces = [], activeWorkspaceId = 'default', workspaceName = '';
+  // Multi-select
+  let selectedIds = new Set(), lastClickWasSelect = false;
+  // Quick launcher
+  let showLauncher = false, launcherQuery = '', launcherIndex = 0;
+  // Zoom & pan
+  let zoom = 1, panX = 0, panY = 0, isPanning = false, panStart = {x:0,y:0,px:0,py:0};
+  // Tooltip
+  let hoveredId = null, tooltipPos = {x:0,y:0}, tooltipTimer = null;
+  // Highlight connections
+  let highlightNodeId = null;
+  // Command history
+  let commandHistory = [];
+  // Theme
   let settings = loadSettings();
 
   function createDefaultSettings() {
     return {
-      general: {
-        openOnLogin: false,
-        startMinimizedToTray: false,
-        restoreLastMode: true,
-        lastMode: 'settings',
-      },
-      appearance: {
-        motionScale: 1,
-        nodeGlow: 0.45,
-        showGrid: false,
-      },
-      nodes: {
-        showDesktop: false,
-        smoothness: 0.2,
-        clickThrough: true,
-      },
-      tray: {
-        leftClickAction: 'open-settings',
-      },
-      shortcuts: {
-        toggleStealth: 'Alt+S',
-      },
+      general: { openOnLogin:false, startMinimizedToTray:false, restoreLastMode:true, lastMode:'settings' },
+      appearance: { theme:'dark', motionScale:1, nodeGlow:0.45 },
+      nodes: { showDesktop:true, smoothness:0.2, clickThrough:false },
+      tray: { leftClickAction:'open-settings' },
+      shortcuts: { toggleStealth:'Alt+S' }
     };
   }
-
-  function cloneObject(value) {
-    return JSON.parse(JSON.stringify(value));
-  }
-
-  function mergeSettings(base, incoming) {
-    const next = cloneObject(base);
-    if (!incoming || typeof incoming !== 'object') {
-      return next;
+  function cloneObj(v) { return JSON.parse(JSON.stringify(v)); }
+  function mergeSettings(base, inc) {
+    const n = cloneObj(base);
+    if (!inc || typeof inc !== 'object') return n;
+    for (const [k,v] of Object.entries(inc)) {
+      if (v && typeof v === 'object' && !Array.isArray(v) && n[k] && typeof n[k] === 'object' && !Array.isArray(n[k])) n[k] = mergeSettings(n[k], v);
+      else if (v !== undefined) n[k] = v;
     }
-
-    for (const [key, value] of Object.entries(incoming)) {
-      if (value && typeof value === 'object' && !Array.isArray(value) && next[key] && typeof next[key] === 'object' && !Array.isArray(next[key])) {
-        next[key] = mergeSettings(next[key], value);
-      } else if (value !== undefined) {
-        next[key] = value;
-      }
-    }
-
-    return next;
+    return n;
   }
-
   function loadSettings() {
-    const defaults = createDefaultSettings();
-    if (typeof window === 'undefined') {
-      return defaults;
-    }
+    const d = createDefaultSettings();
+    if (typeof window === 'undefined') return d;
+    try { const r = localStorage.getItem(SETTINGS_KEY); return r ? mergeSettings(d, JSON.parse(r)) : d; } catch { return d; }
+  }
+  function persistSettings() { if (typeof window !== 'undefined') localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
+  function updateSettings(fn) { const n = cloneObj(settings); fn(n); settings = n; persistSettings(); }
 
-    try {
-      const raw = window.localStorage.getItem(SETTINGS_KEY);
-      if (!raw) {
-        return defaults;
-      }
-      const parsed = JSON.parse(raw);
-      return mergeSettings(defaults, parsed);
-    } catch {
-      return defaults;
-    }
+  function applyTheme(name) {
+    const t = THEMES[name] || THEMES.dark;
+    const r = document.documentElement;
+    r.style.setProperty('--bg', t.bg); r.style.setProperty('--panel', t.panel);
+    r.style.setProperty('--line', t.line); r.style.setProperty('--text', t.text);
+    r.style.setProperty('--muted', t.muted); r.style.setProperty('--glow', t.glow);
+    r.style.setProperty('--accent', t.accent); r.style.setProperty('--accent-2', t.accent2);
+    r.style.setProperty('--danger', t.danger);
   }
 
-  function persistSettings() {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  function nodeColor(node) { return COLOR_MAP[node?.color || 'cyan'] || COLOR_MAP.cyan; }
+  function recordActivity(msg) {
+    const ts = new Date().toLocaleTimeString();
+    activityLog = [{id:`${Date.now()}-${Math.random()}`, text:`${ts} - ${msg}`}, ...activityLog].slice(0,24);
   }
 
-  function updateSettings(mutator) {
-    const next = cloneObject(settings);
-    mutator(next);
-    settings = next;
-    persistSettings();
+  $: { renderNodes = nodes.map(n => { const s = smoothNodes.find(i=>i.id===n.id); const raw = draggingId===n.id; return {...n, renderX: raw?n.x:(s?s.x:n.x), renderY: raw?n.y:(s?s.y:n.y)}; }); }
+  $: isDesktopWindow = currentWindowLabel === 'desktop';
+  $: { if (typeof document !== 'undefined') {
+    document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
+    document.body.classList.toggle('is-stealth', stealth);
+    document.body.classList.toggle('desktop-mode', isDesktopWindow);
+    document.documentElement.style.setProperty('--motion-scale', String(Math.max(0.4, settings.appearance.motionScale)));
+    document.documentElement.style.setProperty('--node-glow', String(Math.max(0.15, settings.appearance.nodeGlow)));
+    applyTheme(settings.appearance.theme);
+  }}
+  $: contextNode = contextMenu.nodeId ? nodes.find(n=>n.id===contextMenu.nodeId) : null;
+  $: editNode = editPopup.nodeId ? nodes.find(n=>n.id===editPopup.nodeId) : null;
+  $: launcherResults = launcherQuery.trim() ? nodes.filter(n=>n.name.toLowerCase().includes(launcherQuery.toLowerCase())).slice(0,8) : nodes.slice(0,8);
+
+  function nodeRef(el, id) { nodeElements.set(id, el); queueRender(); return { destroy() { nodeElements.delete(id); } }; }
+  function queueRender() { void tick().then(renderConnections); }
+
+  function startSpring() { if (nodeSpringFrame !== null) return; nodeSpringFrame = requestAnimationFrame(stepSpring); }
+  function syncSmooth(imm=false) {
+    const cur = new Map(smoothNodes.map(i=>[i.id,i]));
+    smoothNodes = nodes.map(n => { const e = cur.get(n.id); return (!e||imm) ? {id:n.id,x:n.x,y:n.y,vx:0,vy:0} : e; });
+    startSpring();
   }
-
-  function recordActivity(message) {
-    const timestamp = new Date().toLocaleTimeString();
-    activityLog = [{ id: `${Date.now()}-${Math.random()}`, text: `${timestamp} - ${message}` }, ...activityLog].slice(0, 24);
-  }
-
-  $: {
-    const smoothMap = new Map(smoothNodes.map((item) => [item.id, item]));
-    renderNodes = nodes.map((node) => {
-      const smooth = smoothMap.get(node.id);
-      const useRawPosition = draggingId === node.id;
-      return {
-        ...node,
-        renderX: useRawPosition ? node.x : (smooth ? smooth.x : node.x),
-        renderY: useRawPosition ? node.y : (smooth ? smooth.y : node.y),
-      };
-    });
-  }
-
-  $: {
-    isDesktopWindow = currentWindowLabel === 'desktop';
-  }
-
-  $: {
-    if (typeof document !== 'undefined') {
-      document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
-      document.documentElement.classList.toggle('settings-app-window', !isDesktopWindow);
-      document.body.classList.toggle('is-stealth', stealth);
-      document.body.classList.toggle('desktop-mode', isDesktopWindow);
-      document.body.classList.toggle('desktop-overlay-window', isDesktopWindow);
-      document.body.classList.toggle('settings-app-window', !isDesktopWindow);
-      document.documentElement.style.setProperty('--motion-scale', String(Math.max(0.4, settings.appearance.motionScale)));
-      document.documentElement.style.setProperty('--node-glow', String(Math.max(0.15, settings.appearance.nodeGlow)));
-      document.documentElement.style.setProperty('--grid-opacity', '0');
-    }
-  }
-
-  $: contextNode = contextMenu.nodeId ? nodes.find((node) => node.id === contextMenu.nodeId) : null;
-  $: editNode = editPopup.nodeId ? nodes.find((node) => node.id === editPopup.nodeId) : null;
-
-  function nodeRef(element, id) {
-    nodeElements.set(id, element);
-    queueRenderConnections();
-
-    return {
-      destroy() {
-        nodeElements.delete(id);
-      },
-    };
-  }
-
-  function queueRenderConnections() {
-    void tick().then(renderConnections);
-  }
-
-  function startNodeSpring() {
-    if (nodeSpringFrame !== null) {
-      return;
-    }
-    nodeSpringFrame = window.requestAnimationFrame(stepNodeSpring);
-  }
-
-  function syncSmoothNodes(immediate = false) {
-    const current = new Map(smoothNodes.map((item) => [item.id, item]));
-
-    smoothNodes = nodes.map((node) => {
-      const existing = current.get(node.id);
-      if (!existing || immediate) {
-        return { id: node.id, x: node.x, y: node.y, vx: 0, vy: 0 };
-      }
-      return existing;
-    });
-
-    if (immediate) {
-      smoothNodes = smoothNodes.map((item) => {
-        const target = nodes.find((node) => node.id === item.id);
-        if (!target) {
-          return item;
-        }
-        return { ...item, x: target.x, y: target.y, vx: 0, vy: 0 };
-      });
-    }
-
-    startNodeSpring();
-  }
-
-  function stepNodeSpring() {
+  function stepSpring() {
     nodeSpringFrame = null;
-    if (!smoothNodes.length) {
-      return;
-    }
-
-    const stiffness = Math.max(0.08, Math.min(0.45, settings.nodes.smoothness));
-    const damping = 0.82;
-    const targets = new Map(nodes.map((node) => [node.id, node]));
+    if (!smoothNodes.length) return;
+    const st = Math.max(0.08, Math.min(0.45, settings.nodes.smoothness)), damp = 0.82;
+    const tgts = new Map(nodes.map(n=>[n.id,n]));
     let active = false;
-
-    smoothNodes = smoothNodes.map((item) => {
-      const target = targets.get(item.id);
-      if (!target) {
-        return item;
-      }
-
-      if (draggingId === item.id) {
-        return { ...item, x: target.x, y: target.y, vx: 0, vy: 0 };
-      }
-
-      const dx = target.x - item.x;
-      const dy = target.y - item.y;
-      const vx = (item.vx + dx * stiffness) * damping;
-      const vy = (item.vy + dy * stiffness) * damping;
-      const x = item.x + vx;
-      const y = item.y + vy;
-
-      if (Math.abs(dx) > 0.14 || Math.abs(dy) > 0.14 || Math.abs(vx) > 0.14 || Math.abs(vy) > 0.14) {
-        active = true;
-      }
-
-      return { ...item, x, y, vx, vy };
+    smoothNodes = smoothNodes.map(i => {
+      const t = tgts.get(i.id); if (!t) return i;
+      if (draggingId===i.id) return {...i,x:t.x,y:t.y,vx:0,vy:0};
+      const dx=t.x-i.x, dy=t.y-i.y, vx=(i.vx+dx*st)*damp, vy=(i.vy+dy*st)*damp;
+      if (Math.abs(dx)>0.14||Math.abs(dy)>0.14||Math.abs(vx)>0.14||Math.abs(vy)>0.14) active=true;
+      return {...i, x:i.x+vx, y:i.y+vy, vx, vy};
     });
-
-    queueRenderConnections();
-    if (active) {
-      nodeSpringFrame = window.requestAnimationFrame(stepNodeSpring);
-    }
+    queueRender();
+    if (active) nodeSpringFrame = requestAnimationFrame(stepSpring);
   }
 
-  async function syncDesktopVisibilityWithBackend(visible) {
-    try {
-      await invoke('set_desktop_visibility', { visible });
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
+  async function syncDesktopVis(v) { try { await invoke('set_desktop_visibility',{visible:v}); } catch(e) { updateStatus(String(e)); } }
+  async function syncDesktopCT(e) { try { await invoke('set_desktop_click_through',{enabled:e}); } catch(e2) { updateStatus(String(e2)); } }
+  function updateDesktopCT(en,sync=true) { updateSettings(d=>{d.nodes.clickThrough=Boolean(en);}); if(sync) void syncDesktopCT(Boolean(en)); }
 
-  async function syncDesktopClickThroughWithBackend(enabled) {
-    try {
-      await invoke('set_desktop_click_through', { enabled });
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
+  function applyDesktopVis(vis,sync=true) {
+    showDesktop = Boolean(vis); closeCtx(); if(!vis){closeEditor();expandedNodeId=null;}
+    if(!isDesktopWindow) updateSettings(d=>{d.nodes.showDesktop=showDesktop; if(d.general.restoreLastMode)d.general.lastMode=showDesktop?'desktop':'settings';});
+    if(sync) void syncDesktopVis(showDesktop);
+    queueRender();
   }
-
-  function updateDesktopClickThrough(enabled, syncBackend = true) {
-    const nextEnabled = Boolean(enabled);
-    updateSettings((draft) => {
-      draft.nodes.clickThrough = nextEnabled;
+  function closeCtx() { if(contextMenu.open) contextMenu={open:false,x:0,y:0,nodeId:null}; }
+  function closeEditor() { if(editPopup.open) editPopup={open:false,x:0,y:0,nodeId:null}; }
+  function openEditor(nid) {
+    const n=nodes.find(i=>i.id===nid), el=nodeElements.get(nid);
+    if(!n||!el) return;
+    const r=el.getBoundingClientRect(), pw=320, ph=420;
+    let x=r.right+14; if(x+pw>innerWidth-12) x=r.left-pw-14;
+    x=Math.max(12,Math.min(x,innerWidth-pw-12));
+    const y=Math.max(12,Math.min(r.top,innerHeight-ph-12));
+    editDraft={name:n.name??'',description:n.description??'',path:n.targets?.path??'',browser:n.targets?.browser??'',script:n.targets?.script??'',color:n.color||'cyan',macros:[...(n.macros||[])]};
+    editSelectedLinks=[...(n.links??[])];
+    editPopup={open:true,x,y,nodeId:nid};
+  }
+  function toggleEditLink(tid,en) { editSelectedLinks = en ? [...new Set([...editSelectedLinks,tid])] : editSelectedLinks.filter(i=>i!==tid); }
+  function saveEditor() {
+    if(!editPopup.nodeId) return;
+    const nid=editPopup.nodeId;
+    nodes=nodes.map(n=>{
+      if(n.id!==nid) return n;
+      return {...n, name:editDraft.name.trim()||n.name, description:editDraft.description.trim(),
+        color:editDraft.color||'cyan', macros:[...editDraft.macros],
+        links:[...new Set(editSelectedLinks.filter(l=>l!==nid))],
+        targets:{...(n.targets??{}), path:editDraft.path.trim()||null, browser:editDraft.browser.trim()||null, script:editDraft.script.trim()||null}};
     });
+    scheduleSave(); queueRender(); updateStatus('Node updated'); closeEditor();
+  }
+  function addMacroStep() { editDraft.macros = [...editDraft.macros, {action:'open-browser',value:''}]; }
+  function removeMacroStep(i) { editDraft.macros = editDraft.macros.filter((_,idx)=>idx!==i); }
 
-    if (syncBackend) {
-      void syncDesktopClickThroughWithBackend(nextEnabled);
-    }
+  function toggleExpanded(nid) { expandedNodeId = expandedNodeId===nid ? null : nid; if(expandedNodeId!==nid) closeEditor(); }
+  function openEditorSoon(nid) { expandedNodeId=nid; void tick().then(()=>openEditor(nid)); }
+  function openCtxMenu(ev,nid) {
+    ev.preventDefault(); ev.stopPropagation(); expandedNodeId=nid; closeEditor();
+    contextMenu={open:true, x:Math.max(10,Math.min(ev.clientX,innerWidth-240)), y:Math.max(10,Math.min(ev.clientY,innerHeight-300)), nodeId:nid};
   }
 
-  function applyDesktopVisibility(visible, syncBackend = true) {
-    const nextVisible = Boolean(visible);
-    showDesktop = nextVisible;
-    closeContextMenu();
-    if (!nextVisible) {
-      closeNodeEditor();
-      expandedNodeId = null;
-    }
+  // Context menu actions
+  function addConnected() { const s=contextNode; if(!s){closeCtx();return;} const t=nodeTemplates.find(i=>i.id===selectedTemplate)||nodeTemplates[0]; const n={id:uid(t.id),name:`${t.name} Node`,icon:t.icon,description:t.description,x:s.x+260,y:s.y+30,links:[],targets:{path:'.',editor:'.',browser:t.browser,script:t.script},color:'cyan',group:null,macros:[],collapsed:false,last_launched:null}; nodes=[...nodes.map(i=>i.id!==s.id?i:{...i,links:[...new Set([...(i.links??[]),n.id])]}),n]; syncSmooth(true); scheduleSave(); updateStatus(`Added connected node`); closeCtx(); }
+  function connectNearest() { const s=contextNode; if(!s){closeCtx();return;} const cands=nodes.filter(n=>n.id!==s.id); if(!cands.length){closeCtx();return;} const near=cands.reduce((b,c)=>(((c.x-s.x)**2+(c.y-s.y)**2)<((b.x-s.x)**2+(b.y-s.y)**2)?c:b)); nodes=nodes.map(n=>n.id!==s.id?n:{...n,links:[...new Set([...(n.links??[]),near.id])]}); scheduleSave(); queueRender(); closeCtx(); }
+  function clearLinks() { const s=contextNode; if(!s){closeCtx();return;} nodes=nodes.map(n=>n.id===s.id?{...n,links:[]}:n); scheduleSave(); queueRender(); closeCtx(); }
+  function cloneFromMenu() { if(contextNode)cloneNode(contextNode.id); closeCtx(); }
+  function deleteFromMenu() { if(contextNode)deleteNode(contextNode.id); closeCtx(); }
 
-    if (!isDesktopWindow) {
-      updateSettings((draft) => {
-        draft.nodes.showDesktop = nextVisible;
-        if (draft.general.restoreLastMode) {
-          draft.general.lastMode = nextVisible ? 'desktop' : 'settings';
-        }
-      });
-    }
+  // Multi-select
+  function toggleSelect(nid, ev) {
+    if(!ev.ctrlKey&&!ev.metaKey) return false;
+    const next = new Set(selectedIds);
+    if(next.has(nid)) next.delete(nid); else next.add(nid);
+    selectedIds = next; lastClickWasSelect = true; return true;
+  }
+  function batchLaunch() { for(const id of selectedIds) { const n=nodes.find(i=>i.id===id); if(n) void launchNode(n,'open-path'); } selectedIds=new Set(); }
+  function batchDelete() { for(const id of selectedIds) deleteNode(id); selectedIds=new Set(); }
 
-    if (syncBackend) {
-      void syncDesktopVisibilityWithBackend(nextVisible);
-    }
-
-    queueRenderConnections();
+  // Quick launcher
+  function openLauncher() { showLauncher=true; launcherQuery=''; launcherIndex=0; void tick().then(()=>{const el=document.getElementById('launcher-input'); if(el)el.focus();}); }
+  function closeLauncher() { showLauncher=false; launcherQuery=''; }
+  function launcherKey(ev) {
+    if(ev.key==='Escape'){closeLauncher();return;}
+    if(ev.key==='ArrowDown'){launcherIndex=Math.min(launcherIndex+1,launcherResults.length-1);return;}
+    if(ev.key==='ArrowUp'){launcherIndex=Math.max(launcherIndex-1,0);return;}
+    if(ev.key==='Enter'&&launcherResults[launcherIndex]){void launchNode(launcherResults[launcherIndex],'open-path');closeLauncher();}
   }
 
-  function closeContextMenu() {
-    if (!contextMenu.open) {
-      return;
-    }
-
-    contextMenu = {
-      open: false,
-      x: 0,
-      y: 0,
-      nodeId: null,
-    };
+  // Smart layout
+  function layoutGrid() {
+    const cols = Math.ceil(Math.sqrt(nodes.length)), gap = 200;
+    nodes = nodes.map((n,i)=>({...n, x:80+(i%cols)*gap, y:80+Math.floor(i/cols)*gap}));
+    syncSmooth(true); scheduleSave(); updateStatus('Grid layout applied');
   }
 
-  function closeNodeEditor() {
-    if (!editPopup.open) {
-      return;
-    }
+  // Zoom & pan
+  function handleWheel(ev) { if(!isDesktopWindow) return; ev.preventDefault(); const d=ev.deltaY>0?-0.1:0.1; zoom=Math.max(0.3,Math.min(3,zoom+d)); }
+  function startPan(ev) { if(ev.button!==1) return; ev.preventDefault(); isPanning=true; panStart={x:ev.clientX,y:ev.clientY,px:panX,py:panY}; }
+  function onPanMove(ev) { if(!isPanning) return; panX=panStart.px+(ev.clientX-panStart.x); panY=panStart.py+(ev.clientY-panStart.y); }
+  function endPan() { isPanning=false; }
+  function resetView() { zoom=1; panX=0; panY=0; }
 
-    editPopup = {
-      open: false,
-      x: 0,
-      y: 0,
-      nodeId: null,
-    };
+  // Workspace management
+  async function loadWorkspaces() { try { const layout = await invoke('load_layout'); workspaces=layout.workspaces||[]; activeWorkspaceId=layout.active_workspace||'default'; commandHistory=layout.command_history||[]; const ws=workspaces.find(w=>w.id===activeWorkspaceId)||workspaces[0]; if(ws){nodes=ws.nodes||[];zoom=ws.zoom||1;panX=ws.pan_x||0;panY=ws.pan_y||0;} syncSmooth(true); } catch(e) { updateStatus(String(e)); } }
+  async function switchWorkspace(id) { try { const layout=await invoke('switch_workspace',{workspaceId:id}); workspaces=layout.workspaces; activeWorkspaceId=layout.active_workspace; commandHistory=layout.command_history||[]; const ws=workspaces.find(w=>w.id===activeWorkspaceId); if(ws){nodes=ws.nodes||[];zoom=ws.zoom||1;panX=ws.pan_x||0;panY=ws.pan_y||0;} syncSmooth(true); queueRender(); updateStatus(`Switched to ${ws?.name}`); } catch(e) { updateStatus(String(e)); } }
+  async function createWorkspace() { if(!workspaceName.trim()) return; try { await invoke('create_workspace',{name:workspaceName.trim()}); workspaceName=''; await loadWorkspaces(); updateStatus('Workspace created'); } catch(e) { updateStatus(String(e)); } }
+  async function deleteWorkspace(id) { try { await invoke('delete_workspace',{workspaceId:id}); await loadWorkspaces(); updateStatus('Workspace deleted'); } catch(e) { updateStatus(String(e)); } }
+
+  // Core CRUD
+  function uid(base) { return `${base}-${Math.random().toString(36).slice(2,8)}`; }
+  function hasText(v) { return typeof v==='string'&&v.trim().length>0; }
+  function hasAction(n,a) { const t=n?.targets??{}; if(a==='open-path')return hasText(t.path); if(a==='open-editor')return hasText(t.editor)||hasText(t.path); if(a==='open-browser')return hasText(t.browser); if(a==='run-script')return hasText(t.script); return false; }
+  function hasAnyActions(n) { return hasAction(n,'open-path')||hasAction(n,'open-editor')||hasAction(n,'open-browser')||hasAction(n,'run-script'); }
+  async function launchNode(n,a) { try { await invoke('launch_node',{node:n,action:a}); updateStatus(`Launched ${n.name}`); } catch(e) { updateStatus(String(e)); } }
+  async function runMacro(steps) { try { await invoke('run_node_macro',{steps}); updateStatus('Macro started'); } catch(e) { updateStatus(String(e)); } }
+  async function toggleStealth() { try { await invoke('set_stealth_mode',{enabled:!stealth}); } catch(e) { updateStatus(String(e)); } }
+  async function revealGhost() { if(!stealth) return; try { await invoke('set_stealth_mode',{enabled:false}); } catch(e) { updateStatus(String(e)); } }
+  async function hideToTray() { try { await invoke('hide_main_window'); } catch(e) { updateStatus(String(e)); } }
+  async function exitApp() { try { await invoke('exit_app'); } catch(e) { updateStatus(String(e)); } }
+  async function pinBottom() { try { await invoke('pin_desktop_bottom'); } catch(e) {} }
+  function toggleDesktop() { applyDesktopVis(!showDesktop, true); }
+
+  function addNode() {
+    const t=nodeTemplates.find(i=>i.id===selectedTemplate)||nodeTemplates[0]; const off=nodes.length*18;
+    const n={id:uid(t.id),name:'',icon:t.icon,description:'',x:90+off,y:110+off,links:[],targets:{path:null,editor:null,browser:null,script:null},color:'cyan',group:null,macros:[],collapsed:false,last_launched:null};
+    nodes=[...nodes,n]; syncSmooth(true); scheduleSave(); updateStatus('Added node'); openEditorSoon(n.id);
   }
-
-  function openNodeEditor(nodeId) {
-    const node = nodes.find((item) => item.id === nodeId);
-    const element = nodeElements.get(nodeId);
-    if (!node || !element) {
-      return;
-    }
-
-    const rect = element.getBoundingClientRect();
-    const popupWidth = 320;
-    const popupHeight = 420;
-    let x = rect.right + 14;
-    if (x + popupWidth > window.innerWidth - 12) {
-      x = rect.left - popupWidth - 14;
-    }
-
-    x = Math.max(12, Math.min(x, window.innerWidth - popupWidth - 12));
-    const y = Math.max(12, Math.min(rect.top, window.innerHeight - popupHeight - 12));
-
-    editDraft = {
-      name: node.name ?? '',
-      description: node.description ?? '',
-      path: node.targets?.path ?? '',
-      browser: node.targets?.browser ?? '',
-      script: node.targets?.script ?? '',
-    };
-    editSelectedLinks = [...(node.links ?? [])];
-
-    editPopup = {
-      open: true,
-      x,
-      y,
-      nodeId,
-    };
-  }
-
-  function toggleEditLink(targetId, enabled) {
-    if (enabled) {
-      editSelectedLinks = Array.from(new Set([...editSelectedLinks, targetId]));
-      return;
-    }
-
-    editSelectedLinks = editSelectedLinks.filter((item) => item !== targetId);
-  }
-
-  function saveNodeEditor() {
-    if (!editPopup.nodeId) {
-      return;
-    }
-
-    const nodeId = editPopup.nodeId;
-    nodes = nodes.map((node) => {
-      if (node.id !== nodeId) {
-        return node;
-      }
-
-      const nextName = editDraft.name.trim() || node.name;
-      return {
-        ...node,
-        name: nextName,
-        description: editDraft.description.trim(),
-        links: Array.from(new Set(editSelectedLinks.filter((linkId) => linkId !== nodeId))),
-        targets: {
-          ...(node.targets ?? {}),
-          path: editDraft.path.trim() || null,
-          browser: editDraft.browser.trim() || null,
-          script: editDraft.script.trim() || null,
-        },
-      };
-    });
-
-    scheduleSave();
-    queueRenderConnections();
-    updateStatus('Node details updated');
-    closeNodeEditor();
-  }
-
-  function toggleNodeExpanded(nodeId) {
-    expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
-    if (expandedNodeId !== nodeId) {
-      closeNodeEditor();
-    }
-  }
-
-  function openNodeEditorSoon(nodeId) {
-    expandedNodeId = nodeId;
-    void tick().then(() => {
-      openNodeEditor(nodeId);
-    });
-  }
-
-  function openNodeContextMenu(event, nodeId) {
-    event.preventDefault();
-    event.stopPropagation();
-    expandedNodeId = nodeId;
-    closeNodeEditor();
-
-    const maxX = window.innerWidth - 240;
-    const maxY = window.innerHeight - 250;
-
-    contextMenu = {
-      open: true,
-      x: Math.max(10, Math.min(event.clientX, maxX)),
-      y: Math.max(10, Math.min(event.clientY, maxY)),
-      nodeId,
-    };
-  }
-
-  function addConnectedNodeFromMenu() {
-    const source = contextNode;
-    if (!source) {
-      closeContextMenu();
-      return;
-    }
-
-    const template = nodeTemplates.find((item) => item.id === selectedTemplate) ?? nodeTemplates[0];
-    const node = {
-      id: uniqueNodeId(template.id),
-      name: `${template.name} Node`,
-      icon: template.icon,
-      description: template.description,
-      x: source.x + 260,
-      y: source.y + 30,
-      links: [],
-      targets: {
-        path: '.',
-        editor: '.',
-        browser: template.browser,
-        script: template.script,
-      },
-    };
-
-    nodes = [
-      ...nodes.map((item) => {
-        if (item.id !== source.id) {
-          return item;
-        }
-
-        return {
-          ...item,
-          links: Array.from(new Set([...(item.links ?? []), node.id])),
-        };
-      }),
-      node,
-    ];
-
-    syncSmoothNodes(true);
-    scheduleSave();
-    updateStatus(`Added connected node from ${source.name}`);
-    closeContextMenu();
-  }
-
-  function connectNearestNodeFromMenu() {
-    const source = contextNode;
-    if (!source) {
-      closeContextMenu();
-      return;
-    }
-
-    const candidates = nodes.filter((node) => node.id !== source.id);
-    if (!candidates.length) {
-      updateStatus('No other nodes available to connect');
-      closeContextMenu();
-      return;
-    }
-
-    const nearest = candidates.reduce((best, current) => {
-      const bestDist = (best.x - source.x) ** 2 + (best.y - source.y) ** 2;
-      const currentDist = (current.x - source.x) ** 2 + (current.y - source.y) ** 2;
-      return currentDist < bestDist ? current : best;
-    });
-
-    nodes = nodes.map((node) => {
-      if (node.id !== source.id) {
-        return node;
-      }
-
-      return {
-        ...node,
-        links: Array.from(new Set([...(node.links ?? []), nearest.id])),
-      };
-    });
-
-    scheduleSave();
-    queueRenderConnections();
-    updateStatus(`Connected ${source.name} to ${nearest.name}`);
-    closeContextMenu();
-  }
-
-  function clearNodeLinksFromMenu() {
-    const source = contextNode;
-    if (!source) {
-      closeContextMenu();
-      return;
-    }
-
-    nodes = nodes.map((node) => (node.id === source.id ? { ...node, links: [] } : node));
-    scheduleSave();
-    queueRenderConnections();
-    updateStatus(`Cleared outgoing links from ${source.name}`);
-    closeContextMenu();
-  }
-
-  function cloneNodeFromMenu() {
-    if (contextNode) {
-      cloneNode(contextNode.id);
-    }
-    closeContextMenu();
-  }
-
-  function deleteNodeFromMenu() {
-    if (contextNode) {
-      deleteNode(contextNode.id);
-    }
-    closeContextMenu();
-  }
-
-  async function bootstrap() {
-    const unlistenStealth = await listen('stealth-changed', ({ payload }) => {
-      stealth = Boolean(payload);
-      updateStatus(`Stealth mode ${stealth ? 'enabled' : 'disabled'}`);
-    });
-
-    const unlistenLayout = await listen('layout-updated', async () => {
-      const layout = await loadLayout();
-      nodes = layout?.nodes ?? [];
-      syncSmoothNodes(true);
-      updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
-    });
-
-    const unlistenDesktop = await listen('desktop-visibility-changed', ({ payload }) => {
-      const visible = Boolean(payload);
-      if (isDesktopWindow) {
-        showDesktop = visible;
-        if (!visible) {
-          expandedNodeId = null;
-          closeContextMenu();
-          closeNodeEditor();
-        }
-      } else {
-        applyDesktopVisibility(visible, false);
-      }
-      updateStatus(`Desktop nodes ${Boolean(payload) ? 'shown' : 'hidden'} from tray`);
-    });
-
-    const unlistenClickThrough = await listen('desktop-click-through-changed', ({ payload }) => {
-      const enabled = Boolean(payload);
-      updateSettings((draft) => {
-        draft.nodes.clickThrough = enabled;
-      });
-      updateStatus(`Desktop click-through ${enabled ? 'enabled' : 'disabled'}`);
-    });
-
-    const unlistenOpenSettings = await listen('open-settings-tab', ({ payload }) => {
-      if (isDesktopWindow) {
-        return;
-      }
-      activeTab = typeof payload === 'string' ? payload : 'general';
-      updateStatus('Opened settings from tray');
-    });
-
-    const layout = await loadLayout();
-    nodes = layout?.nodes ?? [];
-    syncSmoothNodes(true);
-
-    if (isDesktopWindow) {
-      showDesktop = true;
-    } else {
-      if (settings.general.restoreLastMode) {
-        showDesktop = settings.general.lastMode === 'desktop';
-      } else {
-        showDesktop = settings.nodes.showDesktop;
-      }
-
-      await syncDesktopVisibilityWithBackend(showDesktop);
-      await syncDesktopClickThroughWithBackend(settings.nodes.clickThrough);
-    }
-
-    updateStatus(`Loaded ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
-    queueRenderConnections();
-
-    if (!isDesktopWindow && settings.general.startMinimizedToTray) {
-      void hideToTray();
-    }
-
-    const onResize = () => queueRenderConnections();
-    const onMove = (event) => onPointerMove(event);
-    const onUp = () => onPointerUp();
-    const onPointerDown = (event) => {
-      if (!(event.target instanceof Element)) {
-        closeContextMenu();
-        closeNodeEditor();
-        return;
-      }
-
-      if (!event.target.closest('.context-menu')) {
-        closeContextMenu();
-      }
-
-      if (!event.target.closest('.node-editor-popup')) {
-        closeNodeEditor();
-      }
-    };
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        closeContextMenu();
-        closeNodeEditor();
-      }
-    };
-
-    window.addEventListener('resize', onResize);
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
-
-    return () => {
-      unlistenStealth();
-      unlistenLayout();
-      unlistenDesktop();
-      unlistenClickThrough();
-      unlistenOpenSettings();
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
-      if (saveTimer) {
-        window.clearTimeout(saveTimer);
-      }
-      if (dragFrame !== null) {
-        window.cancelAnimationFrame(dragFrame);
-      }
-      if (nodeSpringFrame !== null) {
-        window.cancelAnimationFrame(nodeSpringFrame);
-      }
-    };
-  }
-
-  async function loadLayout() {
-    const layout = await invoke('load_layout');
-    return layout;
-  }
-
-  function centerOf(element) {
-    const rect = element.getBoundingClientRect();
-    const layerRect = nodeLayer.getBoundingClientRect();
-    return {
-      x: rect.left - layerRect.left + rect.width / 2,
-      y: rect.top - layerRect.top + rect.height / 2,
-    };
-  }
-
-  function renderConnections() {
-    if (!nodeLayer) {
-      return;
-    }
-
-    const bounds = nodeLayer.getBoundingClientRect();
-    if (!bounds.width || !bounds.height) {
-      return;
-    }
-
-    viewBox = `0 0 ${bounds.width} ${bounds.height}`;
-
-    const next = [];
-    for (const node of renderNodes) {
-      for (const targetId of node.links ?? []) {
-        const sourceEl = nodeElements.get(node.id);
-        const targetEl = nodeElements.get(targetId);
-        if (!sourceEl || !targetEl) {
-          continue;
-        }
-
-        const source = centerOf(sourceEl);
-        const target = centerOf(targetEl);
-        const offsetX = Math.max(100, Math.abs(target.x - source.x) * 0.35);
-        next.push(`M ${source.x} ${source.y} C ${source.x + offsetX} ${source.y}, ${target.x - offsetX} ${target.y}, ${target.x} ${target.y}`);
-      }
-    }
-
-    links = next;
-  }
-
-  function beginDrag(event, id) {
-    if (event.button !== 0) {
-      return;
-    }
-
-    if (event.target instanceof Element && event.target.closest('button')) {
-      return;
-    }
-
-    const node = nodes.find((item) => item.id === id);
-    if (!node) {
-      return;
-    }
-
-    draggingId = id;
-    dragMoved = false;
-    dragStart = {
-      x: event.clientX,
-      y: event.clientY,
-    };
-    closeContextMenu();
-    closeNodeEditor();
-    const rect = event.currentTarget.getBoundingClientRect();
-    dragOffset = {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-    };
-    event.currentTarget.classList.add('is-dragging');
-  }
-
-  function onPointerMove(event) {
-    if (!draggingId || !nodeLayer) {
-      return;
-    }
-
-    if (!dragMoved) {
-      const movedX = Math.abs(event.clientX - dragStart.x);
-      const movedY = Math.abs(event.clientY - dragStart.y);
-      dragMoved = movedX > 4 || movedY > 4;
-    }
-
-    pendingPointer = {
-      x: event.clientX,
-      y: event.clientY,
-    };
-
-    if (dragFrame !== null) {
-      return;
-    }
-
-    dragFrame = window.requestAnimationFrame(() => {
-      dragFrame = null;
-
-      if (!pendingPointer || !draggingId || !nodeLayer) {
-        return;
-      }
-
-      const pointer = pendingPointer;
-      pendingPointer = null;
-
-      const node = nodes.find((item) => item.id === draggingId);
-      if (!node) {
-        return;
-      }
-
-      const layerRect = nodeLayer.getBoundingClientRect();
-      node.x = pointer.x - layerRect.left - dragOffset.x;
-      node.y = pointer.y - layerRect.top - dragOffset.y;
-      nodes = [...nodes];
-      queueRenderConnections();
-    });
-  }
-
-  function onPointerUp() {
-    if (!draggingId) {
-      return;
-    }
-
-    const releasedNodeId = draggingId;
-
-    if (dragFrame !== null) {
-      window.cancelAnimationFrame(dragFrame);
-      dragFrame = null;
-    }
-    pendingPointer = null;
-
-    const element = nodeElements.get(draggingId);
-    if (element) {
-      element.classList.remove('is-dragging');
-    }
-
-    draggingId = null;
-
-    if (dragMoved) {
-      syncSmoothNodes(true);
-      scheduleSave();
-    }
-
-    if (!dragMoved) {
-      toggleNodeExpanded(releasedNodeId);
-    }
-
-    dragMoved = false;
-  }
+  function cloneNode(id) { const n=nodes.find(i=>i.id===id); if(!n) return; nodes=[...nodes,{...n,id:uid(n.id),name:`${n.name} Copy`,x:n.x+26,y:n.y+26,links:[...(n.links??[])],targets:{...(n.targets??{})}}]; syncSmooth(true); scheduleSave(); }
+  function deleteNode(id) { if(contextMenu.nodeId===id)closeCtx(); if(editPopup.nodeId===id)closeEditor(); if(expandedNodeId===id)expandedNodeId=null; nodes=nodes.filter(n=>n.id!==id).map(n=>({...n,links:(n.links??[]).filter(l=>l!==id)})); syncSmooth(true); scheduleSave(); }
+  function moveNode(id,dir) { const i=nodes.findIndex(n=>n.id===id); if(i<0) return; const ti=i+dir; if(ti<0||ti>=nodes.length) return; const next=[...nodes]; const [m]=next.splice(i,1); next.splice(ti,0,m); nodes=next; scheduleSave(); }
 
   function scheduleSave() {
-    if (saveTimer) {
-      window.clearTimeout(saveTimer);
-    }
-
-    saveTimer = window.setTimeout(async () => {
-      await invoke('save_layout', { layout: { nodes } });
-      updateStatus('Layout saved to disk');
+    if(saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(async()=>{
+      const ws = workspaces.find(w=>w.id===activeWorkspaceId);
+      if(ws) { ws.nodes=nodes; ws.zoom=zoom; ws.pan_x=panX; ws.pan_y=panY; }
+      await invoke('save_layout',{layout:{active_workspace:activeWorkspaceId,workspaces,command_history:commandHistory}});
+      updateStatus('Saved');
     }, 220);
   }
+  function updateStatus(t) { statusText=t; recordActivity(t); }
 
-  function updateStatus(text) {
-    statusText = text;
-    recordActivity(text);
+  function beginDrag(ev,id) {
+    if(ev.button!==0||(ev.target instanceof Element&&ev.target.closest('button'))) return;
+    if(toggleSelect(id,ev)) return;
+    const n=nodes.find(i=>i.id===id); if(!n) return;
+    draggingId=id; dragMoved=false; dragStart={x:ev.clientX,y:ev.clientY};
+    closeCtx(); closeEditor();
+    const r=ev.currentTarget.getBoundingClientRect();
+    dragOffset={x:ev.clientX-r.left,y:ev.clientY-r.top};
+    ev.currentTarget.classList.add('is-dragging');
   }
-
-  function hasTextValue(value) {
-    return typeof value === 'string' ? value.trim().length > 0 : false;
-  }
-
-  function hasNodeAction(node, action) {
-    const targets = node?.targets ?? {};
-
-    if (action === 'open-path') {
-      return hasTextValue(targets.path);
-    }
-
-    if (action === 'open-editor') {
-      return hasTextValue(targets.editor) || hasTextValue(targets.path);
-    }
-
-    if (action === 'open-browser') {
-      return hasTextValue(targets.browser);
-    }
-
-    if (action === 'run-script') {
-      return hasTextValue(targets.script);
-    }
-
-    return false;
-  }
-
-  function hasAnyNodeActions(node) {
-    return hasNodeAction(node, 'open-path')
-      || hasNodeAction(node, 'open-editor')
-      || hasNodeAction(node, 'open-browser')
-      || hasNodeAction(node, 'run-script');
-  }
-
-  async function launchNode(node, action) {
-    try {
-      await invoke('launch_node', { node, action });
-      updateStatus(`Launched ${node.name} via ${action}`);
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function openLinkedFolder(node) {
-    if (!hasTextValue(node?.targets?.path)) {
-      updateStatus(`No linked folder configured for ${node?.name ?? 'node'}`);
-      return;
-    }
-
-    await launchNode(node, 'open-path');
-  }
-
-  async function toggleStealth() {
-    try {
-      await invoke('set_stealth_mode', { enabled: !stealth });
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function revealFromGhost() {
-    if (!stealth) {
-      return;
-    }
-
-    try {
-      await invoke('set_stealth_mode', { enabled: false });
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function hideToTray() {
-    try {
-      await invoke('hide_main_window');
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function openSettingsFromTray() {
-    try {
-      await invoke('show_settings_view');
-      activeTab = 'general';
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function exitApp() {
-    try {
-      await invoke('exit_app');
-    } catch (error) {
-      updateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function toggleDesktop() {
-    applyDesktopVisibility(!showDesktop, true);
-  }
-
-  function updateSmoothness(value) {
-    const parsed = Number(value);
-    updateSettings((draft) => {
-      draft.nodes.smoothness = Number.isFinite(parsed) ? parsed : draft.nodes.smoothness;
-    });
-    startNodeSpring();
-  }
-
-  function updateMotionScale(value) {
-    const parsed = Number(value);
-    updateSettings((draft) => {
-      draft.appearance.motionScale = Number.isFinite(parsed) ? parsed : draft.appearance.motionScale;
+  function onPointerMove(ev) {
+    if(isPanning){onPanMove(ev);return;}
+    if(!draggingId||!nodeLayer) return;
+    if(!dragMoved){dragMoved=Math.abs(ev.clientX-dragStart.x)>4||Math.abs(ev.clientY-dragStart.y)>4;}
+    pendingPointer={x:ev.clientX,y:ev.clientY};
+    if(dragFrame!==null) return;
+    dragFrame=requestAnimationFrame(()=>{
+      dragFrame=null; if(!pendingPointer||!draggingId||!nodeLayer) return;
+      const p=pendingPointer; pendingPointer=null;
+      const n=nodes.find(i=>i.id===draggingId); if(!n) return;
+      const lr=nodeLayer.getBoundingClientRect();
+      n.x=(p.x-lr.left-dragOffset.x)/zoom-panX/zoom;
+      n.y=(p.y-lr.top-dragOffset.y)/zoom-panY/zoom;
+      nodes=[...nodes]; queueRender();
     });
   }
-
-  function updateNodeGlow(value) {
-    const parsed = Number(value);
-    updateSettings((draft) => {
-      draft.appearance.nodeGlow = Number.isFinite(parsed) ? parsed : draft.appearance.nodeGlow;
-    });
+  function onPointerUp() {
+    if(isPanning){endPan();return;}
+    if(!draggingId) return;
+    const rid=draggingId;
+    if(dragFrame!==null){cancelAnimationFrame(dragFrame);dragFrame=null;} pendingPointer=null;
+    const el=nodeElements.get(draggingId); if(el) el.classList.remove('is-dragging');
+    draggingId=null;
+    if(dragMoved){syncSmooth(true);scheduleSave();pinBottom();}
+    if(!dragMoved&&!lastClickWasSelect) toggleExpanded(rid);
+    dragMoved=false; lastClickWasSelect=false;
   }
 
-  function toggleGrid(enabled) {
-    updateSettings((draft) => {
-      draft.appearance.showGrid = enabled;
-    });
-  }
-
-  function uniqueNodeId(base) {
-    return `${base}-${Math.random().toString(36).slice(2, 8)}`;
-  }
-
-  function addNodeFromTemplate() {
-    const template = nodeTemplates.find((item) => item.id === selectedTemplate) ?? nodeTemplates[0];
-    const offset = nodes.length * 18;
-    const node = {
-      id: uniqueNodeId(template.id),
-      name: '',
-      icon: template.icon,
-      description: '',
-      x: 90 + offset,
-      y: 110 + offset,
-      links: [],
-      targets: {
-        path: null,
-        editor: null,
-        browser: null,
-        script: null,
-      },
-    };
-
-    nodes = [...nodes, node];
-    syncSmoothNodes(true);
-    scheduleSave();
-    updateStatus('Added empty node');
-    openNodeEditorSoon(node.id);
-  }
-
-  function renameNode(id, value) {
-    nodes = nodes.map((node) => (node.id === id ? { ...node, name: value } : node));
-    scheduleSave();
-  }
-
-  function setNodeLinkedFolder(id, value) {
-    const trimmed = value.trim();
-    nodes = nodes.map((node) => {
-      if (node.id !== id) {
-        return node;
-      }
-
-      return {
-        ...node,
-        targets: {
-          ...(node.targets ?? {}),
-          path: trimmed || null,
-        },
-      };
-    });
-    scheduleSave();
-    updateStatus('Updated linked folder path');
-  }
-
-  function moveNode(id, direction) {
-    const index = nodes.findIndex((node) => node.id === id);
-    if (index < 0) {
-      return;
+  function centerOf(el) { const r=el.getBoundingClientRect(), lr=nodeLayer.getBoundingClientRect(); return {x:r.left-lr.left+r.width/2, y:r.top-lr.top+r.height/2}; }
+  function renderConnections() {
+    if(!nodeLayer) return;
+    const b=nodeLayer.getBoundingClientRect(); if(!b.width||!b.height) return;
+    viewBox=`0 0 ${b.width} ${b.height}`;
+    const next=[];
+    for(const n of renderNodes) for(const tid of n.links??[]) {
+      const se=nodeElements.get(n.id), te=nodeElements.get(tid); if(!se||!te) continue;
+      const s=centerOf(se), t=centerOf(te), ox=Math.max(100,Math.abs(t.x-s.x)*0.35);
+      next.push({d:`M ${s.x} ${s.y} C ${s.x+ox} ${s.y}, ${t.x-ox} ${t.y}, ${t.x} ${t.y}`, from:n.id, to:tid});
     }
-
-    const targetIndex = index + direction;
-    if (targetIndex < 0 || targetIndex >= nodes.length) {
-      return;
-    }
-
-    const next = [...nodes];
-    const [moved] = next.splice(index, 1);
-    next.splice(targetIndex, 0, moved);
-    nodes = next;
-    scheduleSave();
-    updateStatus(`Reordered node ${moved.name}`);
+    links=next;
   }
 
-  function cloneNode(id) {
-    const node = nodes.find((item) => item.id === id);
-    if (!node) {
-      return;
-    }
+  // Tooltip
+  function onNodeEnter(ev,nid) { hoveredId=nid; highlightNodeId=nid; const r=ev.currentTarget.getBoundingClientRect(); tooltipPos={x:r.left+r.width/2,y:r.top-8}; }
+  function onNodeLeave() { hoveredId=null; highlightNodeId=null; }
 
-    const clone = {
-      ...node,
-      id: uniqueNodeId(node.id),
-      name: `${node.name} Copy`,
-      x: node.x + 26,
-      y: node.y + 26,
-      links: [...(node.links ?? [])],
-      targets: { ...(node.targets ?? {}) },
-    };
+  async function bootstrap() {
+    const ul1=await listen('stealth-changed',({payload})=>{stealth=Boolean(payload);updateStatus(`Stealth ${stealth?'on':'off'}`);});
+    const ul2=await listen('layout-updated',async()=>{await loadWorkspaces();});
+    const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){expandedNodeId=null;closeCtx();closeEditor();}}else applyDesktopVis(v,false);});
+    const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);});});
+    const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
+    const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
 
-    nodes = [...nodes, clone];
-    syncSmoothNodes(true);
-    scheduleSave();
-    updateStatus(`Cloned node ${node.name}`);
+    await loadWorkspaces();
+    if(isDesktopWindow) showDesktop=true;
+    else { showDesktop=settings.general.restoreLastMode?settings.general.lastMode==='desktop':settings.nodes.showDesktop; await syncDesktopVis(showDesktop); await syncDesktopCT(settings.nodes.clickThrough); }
+    updateStatus(`Loaded ${nodes.length} nodes`); queueRender();
+
+    const onResize=()=>queueRender();
+    const onMove=e=>onPointerMove(e);
+    const onUp=()=>onPointerUp();
+    const onDown=e=>{if(!(e.target instanceof Element)){closeCtx();closeEditor();return;} if(!e.target.closest('.context-menu'))closeCtx(); if(!e.target.closest('.node-editor-popup'))closeEditor(); if(!e.target.closest('.node')&&!e.ctrlKey)selectedIds=new Set();};
+    const onKey=e=>{if(e.key==='Escape'){closeCtx();closeEditor();closeLauncher();}};
+    window.addEventListener('resize',onResize); window.addEventListener('pointermove',onMove);
+    window.addEventListener('pointerup',onUp); window.addEventListener('pointerdown',onDown);
+    window.addEventListener('keydown',onKey);
+
+    return ()=>{ ul1();ul2();ul3();ul4();ul5();ul6(); window.removeEventListener('resize',onResize); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp); window.removeEventListener('pointerdown',onDown); window.removeEventListener('keydown',onKey); if(saveTimer)clearTimeout(saveTimer); if(dragFrame!==null)cancelAnimationFrame(dragFrame); if(nodeSpringFrame!==null)cancelAnimationFrame(nodeSpringFrame); };
   }
 
-  function deleteNode(id) {
-    const removed = nodes.find((node) => node.id === id);
-    if (!removed) {
-      return;
-    }
-
-    if (contextMenu.nodeId === id) {
-      closeContextMenu();
-    }
-
-    if (editPopup.nodeId === id) {
-      closeNodeEditor();
-    }
-
-    if (expandedNodeId === id) {
-      expandedNodeId = null;
-    }
-
-    nodes = nodes
-      .filter((node) => node.id !== id)
-      .map((node) => ({
-        ...node,
-        links: (node.links ?? []).filter((linkId) => linkId !== id),
-      }));
-
-    syncSmoothNodes(true);
-    scheduleSave();
-    updateStatus(`Deleted node ${removed.name}`);
-  }
-
-  function setTab(tabId) {
-    activeTab = tabId;
-  }
-
-  onMount(() => {
+  onMount(()=>{
     currentWindowLabel = appWindow.label ?? 'main';
-
-    let disposed = false;
-    let cleanup = () => {};
-
-    void bootstrap()
-      .then((nextCleanup) => {
-        if (disposed) {
-          nextCleanup();
-          return;
-        }
-        cleanup = nextCleanup;
-      })
-      .catch((error) => {
-        fatalError = error?.stack ?? error?.message ?? String(error);
-      });
-
-    return () => {
-      disposed = true;
-      cleanup();
-    };
+    let disposed=false, cleanup=()=>{};
+    void bootstrap().then(c=>{if(disposed){c();return;}cleanup=c;}).catch(e=>{fatalError=e?.stack??e?.message??String(e);});
+    return ()=>{disposed=true;cleanup();};
   });
 </script>
 
 {#if fatalError}
   <pre class="fatal">{fatalError}</pre>
 {:else if isDesktopWindow}
-  <main class="desktop-overlay stage" class:stage--hidden={!showDesktop}>
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <main class="desktop-overlay stage" class:stage--hidden={!showDesktop} on:wheel|preventDefault={handleWheel} on:mousedown={startPan}>
     <svg class="links" {viewBox}>
-      {#each links as d}
-        <path class="link" {d}></path>
+      {#each links as link}
+        <path class="link" class:link--highlight={highlightNodeId&&(link.from===highlightNodeId||link.to===highlightNodeId)} d={link.d}></path>
       {/each}
     </svg>
 
-    <div class="node-layer" bind:this={nodeLayer}>
+    <div class="node-layer" bind:this={nodeLayer} style="transform:translate({panX}px,{panY}px) scale({zoom});">
       {#each renderNodes as node (node.id)}
-        <article
-          class="node"
-          class:node--expanded={expandedNodeId === node.id}
-          use:nodeRef={node.id}
-          style={`left:${node.renderX}px;top:${node.renderY}px;`}
-          on:pointerdown={(event) => beginDrag(event, node.id)}
-          on:contextmenu|preventDefault|stopPropagation
-        >
+        <article class="node" class:node--expanded={expandedNodeId===node.id} class:node--selected={selectedIds.has(node.id)}
+          use:nodeRef={node.id} style="left:{node.renderX}px;top:{node.renderY}px;--nc:{nodeColor(node)};"
+          on:pointerdown={ev=>beginDrag(ev,node.id)} on:contextmenu={ev=>openCtxMenu(ev,node.id)}
+          on:mouseenter={ev=>onNodeEnter(ev,node.id)} on:mouseleave={onNodeLeave}>
           <div class="node__surface">
+            {#if node.last_launched}
+              <span class="node__status node__status--active" title="Recently launched"></span>
+            {:else}
+              <span class="node__status node__status--idle" title="Idle"></span>
+            {/if}
             {#if expandedNodeId === node.id}
               <header class="node__header">
                 <div class="node__icon">{node.icon ?? '◆'}</div>
                 <div class="node__header-copy">
                   <div class="node__name">{node.name}</div>
-                  <div class="node__meta">{node.id.slice(0, 8)}</div>
+                  <div class="node__meta">{node.id.slice(0,8)}</div>
                 </div>
-                <button class="node__edit-trigger" data-open-editor on:click|stopPropagation={() => openNodeEditor(node.id)}>Edit</button>
+                <button class="node__edit-trigger" on:click|stopPropagation={()=>openEditor(node.id)}>Edit</button>
               </header>
-              <p class="node__body">{node.description ?? 'A linked context node'}</p>
-              {#if hasAnyNodeActions(node)}
+              <p class="node__body">{node.description || 'A linked context node'}</p>
+              {#if hasAnyActions(node)}
                 <div class="node__actions">
-                  {#if hasNodeAction(node, 'open-path')}
-                    <button on:click|stopPropagation={() => openLinkedFolder(node)}>Open Linked Folder</button>
-                  {/if}
-                  {#if hasNodeAction(node, 'open-editor')}
-                    <button on:click|stopPropagation={() => launchNode(node, 'open-editor')}>Editor</button>
-                  {/if}
-                  {#if hasNodeAction(node, 'open-browser')}
-                    <button on:click|stopPropagation={() => launchNode(node, 'open-browser')}>Browser</button>
-                  {/if}
-                  {#if hasNodeAction(node, 'run-script')}
-                    <button on:click|stopPropagation={() => launchNode(node, 'run-script')}>Script</button>
-                  {/if}
+                  {#if hasAction(node,'open-path')}<button on:click|stopPropagation={()=>launchNode(node,'open-path')}>Folder</button>{/if}
+                  {#if hasAction(node,'open-editor')}<button on:click|stopPropagation={()=>launchNode(node,'open-editor')}>Editor</button>{/if}
+                  {#if hasAction(node,'open-browser')}<button on:click|stopPropagation={()=>launchNode(node,'open-browser')}>Browser</button>{/if}
+                  {#if hasAction(node,'run-script')}<button on:click|stopPropagation={()=>launchNode(node,'run-script')}>Script</button>{/if}
                 </div>
-              {:else}
-                <div class="node__empty-actions">No launch actions configured.</div>
+              {/if}
+              {#if node.macros && node.macros.length > 0}
+                <button class="node__macro-btn" on:click|stopPropagation={()=>runMacro(node.macros)}>▶ Run Macro ({node.macros.length} steps)</button>
               {/if}
             {:else}
               <div class="node__compact-title">{node.name}</div>
@@ -1226,930 +408,330 @@
       {/each}
     </div>
 
+    <!-- Zoom controls -->
+    <div class="zoom-controls">
+      <button on:click={()=>{zoom=Math.min(3,zoom+0.2);}}>+</button>
+      <button on:click={resetView}>{Math.round(zoom*100)}%</button>
+      <button on:click={()=>{zoom=Math.max(0.3,zoom-0.2);}}>−</button>
+    </div>
+
+    <!-- Multi-select toolbar -->
+    {#if selectedIds.size > 0}
+      <div class="batch-bar">
+        <span>{selectedIds.size} selected</span>
+        <button on:click={batchLaunch}>Open All</button>
+        <button class="danger" on:click={batchDelete}>Delete All</button>
+        <button on:click={()=>{selectedIds=new Set();}}>Clear</button>
+      </div>
+    {/if}
+
     {#if editPopup.open && editNode}
-      <div
-        class="node-editor-popup"
-        style={`left:${editPopup.x}px;top:${editPopup.y}px;`}
-        on:pointerdown|stopPropagation
-      >
+      <div class="node-editor-popup" style="left:{editPopup.x}px;top:{editPopup.y}px;" on:pointerdown|stopPropagation>
         <div class="node-editor-popup__title">Edit Node</div>
-        <label>
-          <span>Title</span>
-          <input bind:value={editDraft.name} />
-        </label>
-        <label>
-          <span>Description</span>
-          <textarea rows="2" bind:value={editDraft.description}></textarea>
-        </label>
-        <label>
-          <span>Linked folder path</span>
-          <input bind:value={editDraft.path} placeholder="/home/user/project" />
-        </label>
-        <label>
-          <span>Browser URL</span>
-          <input bind:value={editDraft.browser} placeholder="https://..." />
-        </label>
-        <label>
-          <span>Script command</span>
-          <input bind:value={editDraft.script} placeholder="npm run build:web" />
-        </label>
-
-        <div class="node-editor-popup__links">
-          <div class="section__title">Connected Node Links</div>
-          {#if nodes.filter((node) => node.id !== editNode.id).length === 0}
-            <div class="hint">No other nodes available.</div>
-          {:else}
-            {#each nodes.filter((node) => node.id !== editNode.id) as candidate (candidate.id)}
-              <label class="link-toggle">
-                <span>{candidate.name}</span>
-                <input
-                  type="checkbox"
-                  checked={editSelectedLinks.includes(candidate.id)}
-                  on:change={(event) => toggleEditLink(candidate.id, event.currentTarget.checked)}
-                />
-              </label>
+        <label><span>Title</span><input bind:value={editDraft.name}/></label>
+        <label><span>Description</span><textarea rows="2" bind:value={editDraft.description}></textarea></label>
+        <label><span>Folder path</span><input bind:value={editDraft.path} placeholder="/path/to/project"/></label>
+        <label><span>Browser URL</span><input bind:value={editDraft.browser} placeholder="https://..."/></label>
+        <label><span>Script</span><input bind:value={editDraft.script} placeholder="npm run dev"/></label>
+        <label><span>Color</span>
+          <div class="color-picker">
+            {#each NODE_COLORS as c}
+              <button class="color-dot" class:color-dot--active={editDraft.color===c} style="--dc:{COLOR_MAP[c]}" on:click={()=>{editDraft.color=c;}}></button>
             {/each}
-          {/if}
+          </div>
+        </label>
+        <div class="node-editor-popup__links">
+          <div class="section__title">Macros</div>
+          {#each editDraft.macros as step, i}
+            <div class="macro-row">
+              <select bind:value={step.action}><option value="open-browser">Browser</option><option value="open-path">Path</option><option value="run-script">Script</option><option value="delay">Delay(ms)</option></select>
+              <input bind:value={step.value} placeholder="value"/>
+              <button class="danger" on:click={()=>removeMacroStep(i)}>×</button>
+            </div>
+          {/each}
+          <button class="chip chip--sm" on:click={addMacroStep}>+ Add Step</button>
         </div>
-
+        <div class="node-editor-popup__links">
+          <div class="section__title">Links</div>
+          {#each nodes.filter(n=>n.id!==editNode.id) as cand (cand.id)}
+            <label class="link-toggle"><span>{cand.name}</span><input type="checkbox" checked={editSelectedLinks.includes(cand.id)} on:change={ev=>toggleEditLink(cand.id,ev.currentTarget.checked)}/></label>
+          {/each}
+        </div>
         <div class="node-editor-popup__actions">
-          <button on:click={saveNodeEditor}>Save</button>
-          <button class="ghost" on:click={closeNodeEditor}>Cancel</button>
+          <button on:click={saveEditor}>Save</button>
+          <button class="ghost" on:click={closeEditor}>Cancel</button>
         </div>
       </div>
+    {/if}
+
+    {#if contextMenu.open && contextNode}
+      <div class="context-menu" style="left:{contextMenu.x}px;top:{contextMenu.y}px;" on:pointerdown|stopPropagation>
+        <div class="context-menu__title">{contextNode.name}</div>
+        <button on:click={addConnected}>Add Connected Node</button>
+        <button on:click={connectNearest}>Connect Nearest</button>
+        <button on:click={clearLinks}>Clear Links</button>
+        <button on:click={cloneFromMenu}>Clone</button>
+        <button class="danger" on:click={deleteFromMenu}>Delete</button>
+      </div>
+    {/if}
+
+    <!-- Quick launcher -->
+    {#if showLauncher}
+      <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+      <div class="launcher-overlay" role="presentation" on:click|self={closeLauncher}>
+        <div class="launcher">
+          <input id="launcher-input" class="launcher__input" placeholder="Search nodes..." bind:value={launcherQuery} on:keydown={launcherKey}/>
+          <div class="launcher__results">
+            {#each launcherResults as r, i (r.id)}
+              <button class="launcher__item" class:launcher__item--active={i===launcherIndex} on:click={()=>{void launchNode(r,'open-path');closeLauncher();}}>{r.icon} {r.name}</button>
+            {/each}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Tooltip -->
+    {#if hoveredId && !expandedNodeId}
+      {@const tn = nodes.find(n=>n.id===hoveredId)}
+      {#if tn}
+        <div class="tooltip" style="left:{tooltipPos.x}px;top:{tooltipPos.y}px;">{tn.name}{tn.description ? ` — ${tn.description}` : ''}</div>
+      {/if}
     {/if}
   </main>
 {:else}
   <div class="settings-app">
-    <button
-      class="ghost-fin"
-      title="Reveal FinNode"
-      aria-label="Reveal FinNode"
-      on:mouseenter={revealFromGhost}
-    ></button>
-
+    <button class="ghost-fin" title="Reveal" on:mouseenter={revealGhost}></button>
     <aside class="rail rail--settings">
       <div class="settings-head">
-        <div class="brand">
-          <div class="brand__mark">⟡</div>
-          <div>
-            <div class="brand__name">FinNode Settings</div>
-            <div class="brand__tag">desktop node control center</div>
-          </div>
-        </div>
+        <div class="brand"><div class="brand__mark">⟡</div><div><div class="brand__name">FinNode Settings</div><div class="brand__tag">desktop node control</div></div></div>
         <div class="window-controls">
           <button class="window-controls__btn" title="Minimize" on:click={hideToTray}>-</button>
           <button class="window-controls__btn window-controls__btn--danger" title="Exit" on:click={exitApp}>x</button>
         </div>
       </div>
-
       <div class="rail__tabs">
-        {#each settingsTabs as tab}
-          <button class:tab--active={activeTab === tab.id} class="tab" on:click={() => setTab(tab.id)}>{tab.label}</button>
-        {/each}
+        {#each settingsTabs as tab}<button class:tab--active={activeTab===tab.id} class="tab" on:click={()=>{activeTab=tab.id;}}>{tab.label}</button>{/each}
       </div>
-
       <div class="rail__section settings-center">
-        {#if activeTab === 'general'}
+        {#if activeTab==='general'}
           <div class="section__title">Startup</div>
-          <label class="toggle-row">
-            <span>Open on login</span>
-            <input
-              type="checkbox"
-              checked={settings.general.openOnLogin}
-              on:change={(event) => updateSettings((draft) => {
-                draft.general.openOnLogin = event.currentTarget.checked;
-              })}
-            />
-          </label>
-          <label class="toggle-row">
-            <span>Start minimized to tray</span>
-            <input
-              type="checkbox"
-              checked={settings.general.startMinimizedToTray}
-              on:change={(event) => updateSettings((draft) => {
-                draft.general.startMinimizedToTray = event.currentTarget.checked;
-              })}
-            />
-          </label>
-          <label class="toggle-row">
-            <span>Restore last mode</span>
-            <input
-              type="checkbox"
-              checked={settings.general.restoreLastMode}
-              on:change={(event) => updateSettings((draft) => {
-                draft.general.restoreLastMode = event.currentTarget.checked;
-              })}
-            />
-          </label>
-          <p class="hint">Window size is fixed now. Use tray controls to show or hide desktop nodes.</p>
-        {:else if activeTab === 'appearance'}
-          <div class="section__title">Appearance</div>
-          <label class="slider-row">
-            <span>Motion scale: {settings.appearance.motionScale.toFixed(2)}</span>
-            <input type="range" min="0.4" max="1.6" step="0.05" value={settings.appearance.motionScale} on:input={(event) => updateMotionScale(event.currentTarget.value)} />
-          </label>
-          <label class="slider-row">
-            <span>Node glow: {settings.appearance.nodeGlow.toFixed(2)}</span>
-            <input type="range" min="0.15" max="1" step="0.05" value={settings.appearance.nodeGlow} on:input={(event) => updateNodeGlow(event.currentTarget.value)} />
-          </label>
-        {:else if activeTab === 'nodes'}
-          <div class="section__title">Desktop Nodes</div>
-          <button class="chip" on:click={toggleDesktop}>{showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}</button>
-          <label class="toggle-row">
-            <span>Desktop click-through</span>
-            <input
-              type="checkbox"
-              checked={settings.nodes.clickThrough}
-              on:change={(event) => updateDesktopClickThrough(event.currentTarget.checked)}
-            />
-          </label>
-          <label class="slider-row">
-            <span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span>
-            <input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={(event) => updateSmoothness(event.currentTarget.value)} />
-          </label>
-          <div class="hint">Enable click-through to click desktop icons and other apps behind the overlay.</div>
-
-          <div class="section__title node-manager__title">Node Manager</div>
-          <div class="template-row">
-            <select bind:value={selectedTemplate}>
-              {#each nodeTemplates as template}
-                <option value={template.id}>{template.name}</option>
-              {/each}
-            </select>
-            <button class="chip" on:click={addNodeFromTemplate}>Add Node</button>
+          <label class="toggle-row"><span>Open on login</span><input type="checkbox" checked={settings.general.openOnLogin} on:change={ev=>updateSettings(d=>{d.general.openOnLogin=ev.currentTarget.checked;})}/></label>
+          <label class="toggle-row"><span>Start minimized</span><input type="checkbox" checked={settings.general.startMinimizedToTray} on:change={ev=>updateSettings(d=>{d.general.startMinimizedToTray=ev.currentTarget.checked;})}/></label>
+          <label class="toggle-row"><span>Restore last mode</span><input type="checkbox" checked={settings.general.restoreLastMode} on:change={ev=>updateSettings(d=>{d.general.restoreLastMode=ev.currentTarget.checked;})}/></label>
+        {:else if activeTab==='appearance'}
+          <div class="section__title">Theme</div>
+          <div class="theme-row">
+            {#each Object.keys(THEMES) as t}
+              <button class="chip" class:chip--active={settings.appearance.theme===t} on:click={()=>updateSettings(d=>{d.appearance.theme=t;})}>{t}</button>
+            {/each}
           </div>
-
-          <div class="hint">Node editing now happens on desktop: click a node circle, then click Edit.</div>
-
+          <label class="slider-row"><span>Motion: {settings.appearance.motionScale.toFixed(2)}</span><input type="range" min="0.4" max="1.6" step="0.05" value={settings.appearance.motionScale} on:input={ev=>updateSettings(d=>{d.appearance.motionScale=Number(ev.currentTarget.value);})}/></label>
+          <label class="slider-row"><span>Glow: {settings.appearance.nodeGlow.toFixed(2)}</span><input type="range" min="0.15" max="1" step="0.05" value={settings.appearance.nodeGlow} on:input={ev=>updateSettings(d=>{d.appearance.nodeGlow=Number(ev.currentTarget.value);})}/></label>
+        {:else if activeTab==='nodes'}
+          <div class="section__title">Desktop Nodes</div>
+          <button class="chip" on:click={toggleDesktop}>{showDesktop?'Hide Desktop':'Show Desktop'}</button>
+          <label class="toggle-row"><span>Click-through</span><input type="checkbox" checked={settings.nodes.clickThrough} on:change={ev=>updateDesktopCT(ev.currentTarget.checked)}/></label>
+          <label class="slider-row"><span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span><input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={ev=>updateSettings(d=>{d.nodes.smoothness=Number(ev.currentTarget.value);})}/></label>
+          <div class="section__title" style="margin-top:14px;">Workspaces</div>
+          <div class="template-row">
+            <select on:change={ev=>switchWorkspace(ev.currentTarget.value)} value={activeWorkspaceId}>
+              {#each workspaces as ws}<option value={ws.id}>{ws.name}</option>{/each}
+            </select>
+            {#if workspaces.length>1}<button class="chip chip--sm danger" on:click={()=>deleteWorkspace(activeWorkspaceId)}>Del</button>{/if}
+          </div>
+          <div class="template-row"><input bind:value={workspaceName} placeholder="New workspace name"/><button class="chip chip--sm" on:click={createWorkspace}>Create</button></div>
+          <div class="section__title" style="margin-top:14px;">Layout</div>
+          <button class="chip" on:click={layoutGrid}>Auto Grid Layout</button>
+          <div class="section__title" style="margin-top:14px;">Node Manager</div>
+          <div class="template-row">
+            <select bind:value={selectedTemplate}>{#each nodeTemplates as t}<option value={t.id}>{t.name}</option>{/each}</select>
+            <button class="chip chip--sm" on:click={addNode}>Add</button>
+          </div>
           <div class="node-manager">
-            {#each nodes as node, index (node.id)}
+            {#each nodes as node, i (node.id)}
               <div class="node-row">
-                <div class="node-row__title">{node.name}</div>
+                <div class="node-row__title">{node.name||'(unnamed)'}</div>
                 <div class="node-row__actions">
-                  <button on:click={() => moveNode(node.id, -1)} disabled={index === 0}>Up</button>
-                  <button on:click={() => moveNode(node.id, 1)} disabled={index === nodes.length - 1}>Down</button>
-                  <button on:click={() => cloneNode(node.id)}>Clone</button>
-                  <button class="danger" on:click={() => deleteNode(node.id)}>Delete</button>
+                  <button on:click={()=>moveNode(node.id,-1)} disabled={i===0}>↑</button>
+                  <button on:click={()=>moveNode(node.id,1)} disabled={i===nodes.length-1}>↓</button>
+                  <button on:click={()=>cloneNode(node.id)}>⧉</button>
+                  <button class="danger" on:click={()=>deleteNode(node.id)}>×</button>
                 </div>
               </div>
             {/each}
           </div>
-        {:else if activeTab === 'tray'}
-          <div class="section__title">Tray Quick Actions</div>
-          <button class="chip" on:click={openSettingsFromTray}>Open Settings</button>
-          <button class="chip" on:click={toggleStealth}>{stealth ? 'Disable Stealth' : 'Toggle Stealth'}</button>
-          <button class="chip" on:click={toggleDesktop}>{showDesktop ? 'Hide Desktop Nodes' : 'Show Desktop Nodes'}</button>
+        {:else if activeTab==='tray'}
+          <div class="section__title">Quick Actions</div>
+          <button class="chip" on:click={toggleStealth}>{stealth?'Disable Stealth':'Toggle Stealth'}</button>
+          <button class="chip" on:click={toggleDesktop}>{showDesktop?'Hide Desktop':'Show Desktop'}</button>
           <button class="chip" on:click={hideToTray}>Hide To Tray</button>
           <button class="chip chip--danger" on:click={exitApp}>Exit</button>
+        {:else if activeTab==='history'}
+          <div class="section__title">Command History</div>
+          {#if commandHistory.length===0}
+            <div class="hint">No commands recorded yet.</div>
+          {:else}
+            <button class="chip chip--sm danger" on:click={async()=>{await invoke('clear_command_history');commandHistory=[];updateStatus('History cleared');}}>Clear All</button>
+            <div class="activity-list">
+              {#each commandHistory as h, i (i)}
+                <div class="activity-item"><strong>{h.node_name}</strong> — {h.action} <span class="hint">{h.timestamp}</span></div>
+              {/each}
+            </div>
+          {/if}
         {:else}
           <div class="section__title">Shortcuts</div>
-          <div class="hint">Stealth Toggle: {settings.shortcuts.toggleStealth}</div>
-          <div class="hint">Tray click: Open Settings</div>
-          <div class="hint">Tip: right-click any desktop node for connection actions.</div>
+          <div class="hint">Alt+S — Toggle Stealth</div>
+          <div class="hint">Alt+I — Toggle Click-Through</div>
+          <div class="hint">Alt+Space — Quick Launcher</div>
+          <div class="hint">Ctrl+Click — Multi-select nodes</div>
+          <div class="hint">Middle-click drag — Pan canvas</div>
+          <div class="hint">Scroll wheel — Zoom canvas</div>
+          <div class="hint">Right-click node — Context menu</div>
         {/if}
       </div>
-
       <div class="rail__section meter">
         <div class="section__title">Activity</div>
         <div class="activity-list">
-          {#if activityLog.length === 0}
-            <div class="hint">No activity yet.</div>
-          {:else}
-            {#each activityLog as item (item.id)}
-              <div class="activity-item">{item.text}</div>
-            {/each}
-          {/if}
+          {#if activityLog.length===0}<div class="hint">No activity yet.</div>
+          {:else}{#each activityLog as item (item.id)}<div class="activity-item">{item.text}</div>{/each}{/if}
         </div>
       </div>
-
-      <div class="status-bar status-bar--settings">
-        <span>{statusText}</span>
-        <span class="status-dot"></span>
-      </div>
+      <div class="status-bar status-bar--settings"><span>{statusText}</span><span class="status-dot"></span></div>
     </aside>
   </div>
 {/if}
 
 <style>
-  :global(:root) {
-    color-scheme: dark;
-    --bg: #081321;
-    --panel: rgba(9, 18, 31, 0.88);
-    --panel-strong: rgba(13, 24, 39, 0.96);
-    --line: rgba(120, 227, 255, 0.25);
-    --text: #e8f7ff;
-    --muted: rgba(200, 238, 255, 0.72);
-    --glow: rgba(124, 244, 255, 0.45);
-    --accent: #7cf4ff;
-    --accent-2: #9dffb9;
-    --danger: #ff8fa3;
-    --shadow: 0 20px 56px rgba(0, 0, 0, 0.42);
-    --motion-scale: 1;
-    --node-glow: 0.45;
-    --grid-opacity: 0.4;
-    font-family: 'Space Grotesk', sans-serif;
-  }
-
-  * {
-    box-sizing: border-box;
-  }
-
-  :global(html),
-  :global(body) {
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    overflow: hidden;
-    background:
-      radial-gradient(circle at 18% 15%, rgba(52, 201, 255, 0.2), transparent 34%),
-      radial-gradient(circle at 88% 8%, rgba(157, 255, 185, 0.16), transparent 28%),
-      linear-gradient(145deg, #050b14 0%, #0a1628 55%, #050b14 100%);
-    color: var(--text);
-  }
-
-  :global(body)::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-    background-size: 44px 44px;
-    mask-image: radial-gradient(circle at center, black 45%, transparent 82%);
-    opacity: var(--grid-opacity);
-  }
-
-  :global(html.desktop-overlay-window),
-  :global(body.desktop-overlay-window) {
-    background: transparent;
-  }
-
-  :global(body.desktop-overlay-window)::before {
-    opacity: 0;
-  }
-
-  :global(body.is-stealth) .rail {
-    transform: translateX(-18px);
-    opacity: 0.15;
-  }
-
-  :global(body.is-stealth) .ghost-fin {
-    opacity: 1;
-  }
-
-  :global(#app) {
-    width: 100%;
-    height: 100%;
-  }
-
-  .settings-app {
-    position: relative;
-    display: flex;
-    width: 100%;
-    height: 100%;
-  }
-
-  .desktop-overlay {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    background: transparent;
-    pointer-events: none;
-  }
-
-  .settings-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .window-controls {
-    display: flex;
-    gap: 8px;
-  }
-
-  .window-controls__btn {
-    width: 34px;
-    height: 30px;
-    border: 1px solid rgba(124, 244, 255, 0.28);
-    border-radius: 10px;
-    background: rgba(8, 15, 26, 0.82);
-    color: var(--text);
-    font: inherit;
-    font-size: 1rem;
-    line-height: 1;
-    cursor: pointer;
-  }
-
-  .window-controls__btn:hover {
-    border-color: rgba(124, 244, 255, 0.45);
-  }
-
-  .window-controls__btn--danger {
-    border-color: rgba(255, 143, 163, 0.4);
-    color: #ffd9e1;
-  }
-
-  .ghost-fin {
-    border: 0;
-    padding: 0;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 4px;
-    height: 100vh;
-    background: linear-gradient(180deg, transparent, rgba(124, 244, 255, 0.8), transparent);
-    box-shadow: 0 0 18px rgba(124, 244, 255, 0.85);
-    opacity: 0;
-    transition: opacity 180ms ease;
-    z-index: 30;
-  }
-
-  .rail {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding: 20px;
-    background: linear-gradient(180deg, rgba(10, 18, 30, 0.98), rgba(7, 14, 24, 0.95));
-    border-right: 1px solid rgba(124, 244, 255, 0.2);
-    backdrop-filter: blur(24px) saturate(160%);
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
-    transition: transform 260ms ease, opacity 260ms ease;
-  }
-
-  .rail--settings {
-    width: 100%;
-    border-right: 0;
-  }
-
-  .brand {
-    display: flex;
-    gap: 14px;
-    align-items: center;
-  }
-
-  .brand__mark {
-    width: 48px;
-    height: 48px;
-    display: grid;
-    place-items: center;
-    border-radius: 16px;
-    background: radial-gradient(circle at 30% 30%, rgba(124, 244, 255, 0.45), rgba(6, 15, 24, 0.95));
-    box-shadow: 0 0 24px rgba(124, 244, 255, 0.25);
-    color: var(--accent);
-    font-size: 1.4rem;
-  }
-
-  .brand__name {
-    font-size: 1.32rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-  }
-
-  .brand__tag,
-  .section__title,
-  .hint,
-  .status-bar {
-    color: var(--muted);
-  }
-
-  .rail__section {
-    padding: 16px;
-    border: 1px solid rgba(124, 244, 255, 0.2);
-    border-radius: 18px;
-    background: rgba(6, 12, 20, 0.52);
-  }
-
-  .rail__tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 7px;
-  }
-
-  .tab {
-    border: 1px solid rgba(124, 244, 255, 0.2);
-    background: rgba(8, 15, 26, 0.6);
-    color: var(--muted);
-    border-radius: 11px;
-    padding: 9px 8px;
-    font: inherit;
-    font-size: 0.76rem;
-    cursor: pointer;
-    transition: border-color 140ms ease, color 140ms ease, background 140ms ease, transform 140ms ease;
-  }
-
-  .tab:hover {
-    transform: translateY(-1px);
-    border-color: rgba(124, 244, 255, 0.38);
-  }
-
-  .tab--active {
-    color: var(--text);
-    border-color: rgba(124, 244, 255, 0.45);
-    background: rgba(16, 30, 45, 0.88);
-    box-shadow: 0 0 18px rgba(124, 244, 255, 0.16);
-  }
-
-  .settings-center {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-height: 300px;
-  }
-
-  .toggle-row,
-  .slider-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-    color: rgba(233, 248, 255, 0.92);
-    font-size: 0.84rem;
-    margin-top: 8px;
-  }
-
-  .toggle-row input {
-    accent-color: #7cf4ff;
-  }
-
-  .slider-row input[type='range'] {
-    width: 46%;
-  }
-
-  .template-row {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 10px;
-    margin-top: 6px;
-  }
-
-  .template-row select,
-  .node-editor-popup input,
-  .node-editor-popup textarea {
-    width: 100%;
-    border: 1px solid rgba(124, 244, 255, 0.22);
-    background: rgba(8, 15, 26, 0.8);
-    color: var(--text);
-    border-radius: 12px;
-    padding: 8px 10px;
-    font: inherit;
-  }
-
-  .node-manager {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-height: 180px;
-    overflow: auto;
-    margin-top: 8px;
-    padding-right: 2px;
-  }
-
-  .node-manager__title {
-    margin-top: 14px;
-  }
-
-  .node-row {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 10px;
-    border: 1px solid rgba(124, 244, 255, 0.12);
-    border-radius: 12px;
-    background: rgba(8, 14, 23, 0.58);
-  }
-
-  .node-row__title {
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: rgba(233, 248, 255, 0.94);
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .node-row__actions {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
-    width: 220px;
-  }
-
-  .node-row__actions button {
-    border: 1px solid rgba(124, 244, 255, 0.2);
-    background: rgba(8, 15, 26, 0.78);
-    color: var(--text);
-    border-radius: 10px;
-    padding: 6px 8px;
-    font-size: 0.72rem;
-    cursor: pointer;
-  }
-
-  .node-row__actions button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .node-row__actions .danger {
-    border-color: rgba(255, 143, 163, 0.4);
-    color: #ffd9e1;
-  }
-
-  .activity-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: 110px;
-    overflow: auto;
-  }
-
-  .activity-item {
-    font-size: 0.76rem;
-    line-height: 1.35;
-    color: rgba(233, 248, 255, 0.8);
-    border-bottom: 1px dashed rgba(124, 244, 255, 0.16);
-    padding-bottom: 6px;
-  }
-
-  .section__title {
-    margin-bottom: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    font-size: 0.72rem;
-  }
-
-  .chip,
-  .node__actions button,
-  .node-editor-popup__actions button {
-    border: 1px solid rgba(124, 244, 255, 0.22);
-    background: rgba(8, 15, 26, 0.78);
-    color: var(--text);
-    border-radius: 12px;
-    padding: 9px 12px;
-    font: inherit;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-  }
-
-  .chip:hover,
-  .node__actions button:hover {
-    transform: translateY(-1px);
-    border-color: rgba(124, 244, 255, 0.45);
-    box-shadow: 0 0 18px rgba(124, 244, 255, 0.16);
-  }
-
-  .chip {
-    width: 100%;
-    margin-top: 8px;
-  }
-
-  .chip--danger {
-    border-color: rgba(255, 143, 163, 0.4);
-    color: #ffd9e1;
-  }
-
-  .chip:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
-  }
-
-  .stage {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    transition: opacity calc(220ms * var(--motion-scale)) ease, transform calc(220ms * var(--motion-scale)) ease;
-  }
-
-  .stage--hidden {
-    opacity: 0;
-    transform: scale(0.98);
-    pointer-events: none;
-  }
-
-  .links,
-  .node-layer {
-    position: absolute;
-    inset: 0;
-  }
-
-  .links {
-    pointer-events: none;
-  }
-
-  .link {
-    fill: none;
-    stroke: var(--line);
-    stroke-width: 2;
-    stroke-linecap: round;
-    filter: none;
-  }
-
-  .node-layer {
-    padding: 26px;
-    pointer-events: none;
-  }
-
-  .node {
-    position: absolute;
-    width: 84px;
-    height: 84px;
-    border-radius: 50%;
-    cursor: grab;
-    user-select: none;
-    will-change: left, top;
-    z-index: 2;
-    pointer-events: auto;
-    transition: left calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1), top calc(120ms * var(--motion-scale)) cubic-bezier(0.22, 0.61, 0.36, 1);
-  }
-
-  .node.node--expanded {
-    width: 272px;
-    height: auto;
-    min-height: 190px;
-    border-radius: 22px;
-    z-index: 5;
-  }
-
-  .node__surface {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-items: center;
-    padding: 12px;
-    border-radius: inherit;
-    background: linear-gradient(180deg, rgba(18, 27, 41, 0.94), rgba(10, 15, 24, 0.82));
-    border: 1px solid rgba(124, 244, 255, 0.2);
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), 0 0 calc(14px * var(--node-glow)) rgba(124, 244, 255, calc(0.14 * var(--node-glow))) inset;
-    backdrop-filter: none;
-    animation: none;
-    transition: transform calc(140ms * var(--motion-scale)) ease, box-shadow calc(140ms * var(--motion-scale)) ease;
-    will-change: transform;
-  }
-
-  .node__surface::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    box-shadow: 0 0 calc(10px * var(--node-glow)) rgba(124, 244, 255, calc(0.1 * var(--node-glow)));
-    pointer-events: none;
-  }
-
-  .node--expanded .node__surface {
-    display: flex;
-    flex-direction: column;
-    min-height: 190px;
-    padding: 16px;
-    border-radius: 22px;
-    align-items: stretch;
-  }
-
-  .node__compact-title {
-    max-width: 90%;
-    text-align: center;
-    font-size: 0.74rem;
-    letter-spacing: 0.03em;
-    font-weight: 700;
-    line-height: 1.15;
-    color: rgba(233, 248, 255, 0.95);
-    text-shadow: 0 0 12px rgba(124, 244, 255, 0.26);
-  }
-
-  :global(.node.is-dragging) {
-    cursor: grabbing;
-    transition: none;
-  }
-
-  :global(.node.is-dragging) .node__surface {
-    animation-play-state: paused;
-    transform: scale(1.02);
-  }
-
-  .node__header {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-  }
-
-  .node__header-copy {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .node__icon {
-    width: 42px;
-    height: 42px;
-    display: grid;
-    place-items: center;
-    border-radius: 14px;
-    background: rgba(124, 244, 255, 0.12);
-    color: var(--accent);
-    box-shadow: 0 0 15px rgba(124, 244, 255, 0.18);
-  }
-
-  .node__edit-trigger {
-    border: 1px solid rgba(124, 244, 255, 0.25);
-    background: rgba(7, 14, 24, 0.86);
-    color: var(--text);
-    border-radius: 10px;
-    padding: 5px 10px;
-    font: inherit;
-    font-size: 0.76rem;
-    cursor: pointer;
-  }
-
-  .node__edit-trigger:hover {
-    border-color: rgba(124, 244, 255, 0.45);
-  }
-
-  .node__name {
-    font-size: 1.05rem;
-    font-weight: 700;
-  }
-
-  .node__meta {
-    color: var(--muted);
-    font-size: 0.82rem;
-  }
-
-  .node__body {
-    margin: 12px 0;
-    color: rgba(233, 248, 255, 0.82);
-    line-height: 1.4;
-    font-size: 0.82rem;
-  }
-
-  .node__actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .node__empty-actions {
-    margin-top: auto;
-    font-size: 0.74rem;
-    color: var(--muted);
-    opacity: 0.85;
-  }
-
-  .status-bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 14px;
-    border-radius: 14px;
-    background: rgba(5, 9, 16, 0.58);
-    border: 1px solid rgba(124, 244, 255, 0.2);
-    backdrop-filter: blur(16px) saturate(150%);
-    color: var(--muted);
-    font-size: 0.82rem;
-  }
-
-  .status-bar--settings {
-    margin-top: auto;
-  }
-
-  .node-editor-popup {
-    position: fixed;
-    width: 320px;
-    max-height: min(420px, calc(100vh - 24px));
-    overflow: auto;
-    z-index: 130;
-    border: 1px solid rgba(124, 244, 255, 0.35);
-    border-radius: 14px;
-    background: rgba(8, 14, 24, 0.96);
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5), 0 0 20px rgba(124, 244, 255, 0.18);
-    backdrop-filter: blur(16px);
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    pointer-events: auto;
-  }
-
-  .node-editor-popup__title {
-    font-size: 0.88rem;
-    font-weight: 700;
-    color: rgba(233, 248, 255, 0.95);
-    margin-bottom: 2px;
-  }
-
-  .node-editor-popup label {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-
-  .node-editor-popup label > span {
-    font-size: 0.74rem;
-    letter-spacing: 0.03em;
-    color: var(--muted);
-  }
-
-  .node-editor-popup textarea {
-    resize: vertical;
-    min-height: 58px;
-  }
-
-  .node-editor-popup__links {
-    border-top: 1px solid rgba(124, 244, 255, 0.15);
-    margin-top: 4px;
-    padding-top: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .link-toggle {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.78rem;
-    color: rgba(233, 248, 255, 0.9);
-  }
-
-  .link-toggle input {
-    accent-color: #7cf4ff;
-  }
-
-  .node-editor-popup__actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    margin-top: 6px;
-  }
-
-  .node-editor-popup__actions .ghost {
-    background: rgba(10, 18, 28, 0.65);
-  }
-
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--accent-2);
-    box-shadow: 0 0 16px rgba(157, 255, 185, 0.65);
-    animation: pulse 2.4s ease-in-out infinite;
-  }
-
-  .meter {
-    min-height: 0;
-  }
-
-  .hint {
-    line-height: 1.5;
-    margin-top: 6px;
-  }
-
-  .fatal {
-    white-space: pre-wrap;
-    margin: 0;
-    padding: 24px;
-    color: #ffb4c2;
-  }
-
-  @keyframes drift {
-    0%, 100% {
-      transform: translateY(0) translateX(0);
-    }
-    50% {
-      transform: translateY(-6px) translateX(3px);
-    }
-  }
-
-  @keyframes pulse {
-    0%, 100% {
-      opacity: 0.45;
-      transform: scale(0.82);
-    }
-    50% {
-      opacity: 1;
-      transform: scale(1.08);
-    }
-  }
-
-  @media (max-width: 760px) {
-    .node-editor-popup {
-      width: min(92vw, 320px);
-    }
-
-    .node-layer {
-      padding: 18px;
-    }
-
-    .node.node--expanded {
-      width: min(90vw, 272px);
-    }
-  }
+  :global(:root) { color-scheme:dark; --bg:#081321; --panel:rgba(9,18,31,0.88); --panel-strong:rgba(13,24,39,0.96); --line:rgba(120,227,255,0.25); --text:#e8f7ff; --muted:rgba(200,238,255,0.72); --glow:rgba(124,244,255,0.45); --accent:#7cf4ff; --accent-2:#9dffb9; --danger:#ff8fa3; --shadow:0 20px 56px rgba(0,0,0,0.42); --motion-scale:1; --node-glow:0.45; font-family:'Space Grotesk',sans-serif; }
+  * { box-sizing:border-box; }
+  :global(html),:global(body) { width:100%;height:100%;margin:0;overflow:hidden;color:var(--text); background:radial-gradient(circle at 18% 15%,rgba(52,201,255,0.2),transparent 34%),radial-gradient(circle at 88% 8%,rgba(157,255,185,0.16),transparent 28%),linear-gradient(145deg,#050b14 0%,#0a1628 55%,#050b14 100%); }
+  :global(html.desktop-overlay-window),:global(body.desktop-overlay-window) { background:transparent; }
+  :global(body.is-stealth) .rail { transform:translateX(-18px);opacity:0.15; }
+  :global(body.is-stealth) .ghost-fin { opacity:1; }
+  :global(#app) { width:100%;height:100%; }
+
+  .settings-app { position:relative;display:flex;width:100%;height:100%; }
+  .desktop-overlay { position:relative;width:100%;height:100%;background:transparent;pointer-events:none; }
+  .settings-head { display:flex;justify-content:space-between;align-items:flex-start;gap:12px; }
+  .window-controls { display:flex;gap:8px; }
+  .window-controls__btn { width:34px;height:30px;border:1px solid rgba(124,244,255,0.28);border-radius:10px;background:rgba(8,15,26,0.82);color:var(--text);font:inherit;font-size:1rem;cursor:pointer; }
+  .window-controls__btn:hover { border-color:rgba(124,244,255,0.45); }
+  .window-controls__btn--danger { border-color:rgba(255,143,163,0.4);color:#ffd9e1; }
+  .ghost-fin { border:0;padding:0;position:fixed;top:0;left:0;width:4px;height:100vh;background:linear-gradient(180deg,transparent,rgba(124,244,255,0.8),transparent);box-shadow:0 0 18px rgba(124,244,255,0.85);opacity:0;transition:opacity 180ms ease;z-index:30; }
+  .rail { position:relative;display:flex;flex-direction:column;gap:14px;padding:20px;background:linear-gradient(180deg,rgba(10,18,30,0.98),rgba(7,14,24,0.95));border-right:1px solid rgba(124,244,255,0.2);backdrop-filter:blur(24px) saturate(160%);transition:transform 260ms ease,opacity 260ms ease; }
+  .rail--settings { width:100%;border-right:0;overflow-y:auto; }
+  .brand { display:flex;gap:14px;align-items:center; }
+  .brand__mark { width:48px;height:48px;display:grid;place-items:center;border-radius:16px;background:radial-gradient(circle at 30% 30%,rgba(124,244,255,0.45),rgba(6,15,24,0.95));box-shadow:0 0 24px rgba(124,244,255,0.25);color:var(--accent);font-size:1.4rem; }
+  .brand__name { font-size:1.32rem;font-weight:700;letter-spacing:0.04em; }
+  .brand__tag,.section__title,.hint,.status-bar { color:var(--muted); }
+  .rail__section { padding:16px;border:1px solid rgba(124,244,255,0.2);border-radius:18px;background:rgba(6,12,20,0.52); }
+  .rail__tabs { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px; }
+  .tab { border:1px solid rgba(124,244,255,0.2);background:rgba(8,15,26,0.6);color:var(--muted);border-radius:11px;padding:9px 8px;font:inherit;font-size:0.76rem;cursor:pointer;transition:border-color 140ms ease,color 140ms ease; }
+  .tab:hover { border-color:rgba(124,244,255,0.38); }
+  .tab--active { color:var(--text);border-color:rgba(124,244,255,0.45);background:rgba(16,30,45,0.88);box-shadow:0 0 18px rgba(124,244,255,0.16); }
+  .settings-center { display:flex;flex-direction:column;gap:8px;min-height:240px;flex:1;overflow-y:auto; }
+  .toggle-row,.slider-row { display:flex;justify-content:space-between;align-items:center;gap:10px;color:rgba(233,248,255,0.92);font-size:0.84rem;margin-top:4px; }
+  .toggle-row input { accent-color:#7cf4ff; }
+  .slider-row input[type='range'] { width:46%; }
+  .template-row { display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:6px; }
+  .template-row select,.template-row input,.node-editor-popup input,.node-editor-popup textarea,.node-editor-popup select { width:100%;border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.8);color:var(--text);border-radius:12px;padding:8px 10px;font:inherit; }
+  .theme-row { display:flex;gap:8px;flex-wrap:wrap; }
+  .node-manager { display:flex;flex-direction:column;gap:8px;max-height:180px;overflow:auto;margin-top:8px; }
+  .node-row { display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 10px;border:1px solid rgba(124,244,255,0.12);border-radius:12px;background:rgba(8,14,23,0.58); }
+  .node-row__title { font-size:0.82rem;font-weight:600;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+  .node-row__actions { display:flex;gap:6px; }
+  .node-row__actions button { border:1px solid rgba(124,244,255,0.2);background:rgba(8,15,26,0.78);color:var(--text);border-radius:8px;padding:4px 8px;font-size:0.72rem;cursor:pointer; }
+  .node-row__actions button:disabled { opacity:0.45;cursor:not-allowed; }
+  .node-row__actions .danger { border-color:rgba(255,143,163,0.4);color:#ffd9e1; }
+  .activity-list { display:flex;flex-direction:column;gap:6px;max-height:110px;overflow:auto; }
+  .activity-item { font-size:0.76rem;line-height:1.35;color:rgba(233,248,255,0.8);border-bottom:1px dashed rgba(124,244,255,0.16);padding-bottom:6px; }
+  .section__title { margin-bottom:10px;text-transform:uppercase;letter-spacing:0.16em;font-size:0.72rem; }
+  .chip,.node__actions button,.node-editor-popup__actions button { border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.78);color:var(--text);border-radius:12px;padding:9px 12px;font:inherit;font-size:0.8rem;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease; }
+  .chip:hover,.node__actions button:hover { transform:translateY(-1px);border-color:rgba(124,244,255,0.45);box-shadow:0 0 18px rgba(124,244,255,0.16); }
+  .chip { width:100%;margin-top:4px; }
+  .chip--sm { width:auto;padding:6px 10px;font-size:0.74rem; }
+  .chip--active { border-color:var(--accent);background:rgba(124,244,255,0.12);color:var(--accent); }
+  .chip--danger,.danger { border-color:rgba(255,143,163,0.4);color:#ffd9e1; }
+  .chip:disabled { opacity:0.45;cursor:not-allowed; }
+  .stage { position:relative;width:100%;height:100%;overflow:hidden;transition:opacity calc(220ms * var(--motion-scale)) ease; }
+  .stage--hidden { opacity:0;pointer-events:none; }
+  .links,.node-layer { position:absolute;inset:0; }
+  .links { pointer-events:none;z-index:1; }
+  .link { fill:none;stroke:var(--line);stroke-width:2;stroke-linecap:round;transition:stroke 200ms ease,stroke-width 200ms ease; }
+  .link--highlight { stroke:var(--accent);stroke-width:3;filter:drop-shadow(0 0 8px var(--glow)); }
+  .node-layer { padding:26px;pointer-events:none;transform-origin:0 0; }
+  .node { position:absolute;width:84px;height:84px;border-radius:50%;cursor:grab;user-select:none;will-change:left,top;z-index:2;pointer-events:auto;transition:left calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1),top calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1); }
+  .node.node--expanded { width:272px;height:auto;min-height:190px;border-radius:22px;z-index:5; }
+  .node--selected .node__surface { border-color:var(--accent) !important;box-shadow:0 0 20px var(--glow),0 12px 28px rgba(0,0,0,0.32) !important; }
+  .node__surface { position:relative;width:100%;height:100%;display:grid;place-items:center;padding:12px;border-radius:inherit;background:linear-gradient(180deg,rgba(18,27,41,0.94),rgba(10,15,24,0.82));border:1px solid rgba(var(--nc),0.25);box-shadow:0 12px 28px rgba(0,0,0,0.32),0 0 calc(14px * var(--node-glow)) rgba(var(--nc),calc(0.14 * var(--node-glow))) inset;transition:transform calc(140ms * var(--motion-scale)) ease; }
+  .node__surface::after { content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:0 0 calc(10px * var(--node-glow)) rgba(var(--nc),calc(0.1 * var(--node-glow)));pointer-events:none; }
+  .node--expanded .node__surface { display:flex;flex-direction:column;min-height:190px;padding:16px;align-items:stretch; }
+  .node__compact-title { max-width:90%;text-align:center;font-size:0.74rem;font-weight:700;line-height:1.15;color:rgba(233,248,255,0.95);text-shadow:0 0 12px rgba(var(--nc),0.26); }
+  :global(.node.is-dragging) { cursor:grabbing;transition:none; }
+  :global(.node.is-dragging) .node__surface { transform:scale(1.02); }
+  .node__status { position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:50%; }
+  .node__status--active { background:#69f0ae;box-shadow:0 0 8px rgba(105,240,174,0.6); }
+  .node__status--idle { background:rgba(200,238,255,0.35); }
+  .node__header { display:flex;gap:10px;align-items:center; }
+  .node__header-copy { min-width:0;flex:1; }
+  .node__icon { width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:rgba(var(--nc),0.12);color:rgb(var(--nc));box-shadow:0 0 15px rgba(var(--nc),0.18); }
+  .node__edit-trigger { border:1px solid rgba(var(--nc),0.25);background:rgba(7,14,24,0.86);color:var(--text);border-radius:10px;padding:5px 10px;font:inherit;font-size:0.76rem;cursor:pointer; }
+  .node__name { font-size:1.05rem;font-weight:700; }
+  .node__meta { color:var(--muted);font-size:0.82rem; }
+  .node__body { margin:12px 0;color:rgba(233,248,255,0.82);line-height:1.4;font-size:0.82rem; }
+  .node__actions { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }
+  .node__macro-btn { margin-top:8px;border:1px solid rgba(var(--nc),0.3);background:rgba(var(--nc),0.08);color:rgb(var(--nc));border-radius:10px;padding:7px 10px;font:inherit;font-size:0.74rem;cursor:pointer; }
+  .status-bar { display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-radius:14px;background:rgba(5,9,16,0.58);border:1px solid rgba(124,244,255,0.2);color:var(--muted);font-size:0.82rem; }
+  .status-bar--settings { margin-top:auto; }
+  .status-dot { width:10px;height:10px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 16px rgba(157,255,185,0.65);animation:pulse 2.4s ease-in-out infinite; }
+  .meter { min-height:0; }
+  .hint { line-height:1.5;margin-top:4px;font-size:0.78rem; }
+  .fatal { white-space:pre-wrap;margin:0;padding:24px;color:#ffb4c2; }
+
+  /* Editor popup */
+  .node-editor-popup { position:fixed;width:320px;max-height:min(480px,calc(100vh - 24px));overflow:auto;z-index:130;border:1px solid rgba(124,244,255,0.35);border-radius:14px;background:rgba(8,14,24,0.96);box-shadow:0 20px 48px rgba(0,0,0,0.5),0 0 20px rgba(124,244,255,0.18);backdrop-filter:blur(16px);padding:12px;display:flex;flex-direction:column;gap:8px;pointer-events:auto; }
+  .node-editor-popup__title { font-size:0.88rem;font-weight:700;margin-bottom:2px; }
+  .node-editor-popup label { display:flex;flex-direction:column;gap:5px; }
+  .node-editor-popup label > span { font-size:0.74rem;color:var(--muted); }
+  .node-editor-popup textarea { resize:vertical;min-height:48px; }
+  .node-editor-popup__links { border-top:1px solid rgba(124,244,255,0.15);margin-top:4px;padding-top:8px;display:flex;flex-direction:column;gap:6px; }
+  .node-editor-popup__actions { display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:6px; }
+  .node-editor-popup__actions .ghost { background:rgba(10,18,28,0.65); }
+  .link-toggle { display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:0.78rem; }
+  .link-toggle input { accent-color:#7cf4ff; }
+  .color-picker { display:flex;gap:6px;flex-wrap:wrap; }
+  .color-dot { width:24px;height:24px;border-radius:50%;border:2px solid transparent;background:rgb(var(--dc));cursor:pointer;transition:border-color 120ms; }
+  .color-dot--active { border-color:var(--text);box-shadow:0 0 8px rgba(var(--dc),0.5); }
+  .macro-row { display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center; }
+  .macro-row select { width:auto; }
+
+  /* Context menu */
+  .context-menu { position:fixed;z-index:120;min-width:200px;border:1px solid rgba(124,244,255,0.35);border-radius:14px;background:rgba(8,14,24,0.96);box-shadow:0 20px 48px rgba(0,0,0,0.5);padding:10px;display:flex;flex-direction:column;gap:4px;pointer-events:auto; }
+  .context-menu__title { font-size:0.82rem;font-weight:700;padding:4px 8px 8px;border-bottom:1px solid rgba(124,244,255,0.15);margin-bottom:2px; }
+  .context-menu button { border:none;background:transparent;color:var(--text);border-radius:8px;padding:8px 10px;font:inherit;font-size:0.78rem;cursor:pointer;text-align:left; }
+  .context-menu button:hover { background:rgba(124,244,255,0.12); }
+  .context-menu button.danger:hover { background:rgba(255,143,163,0.12); }
+
+  /* Zoom controls */
+  .zoom-controls { position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:4px;z-index:50;pointer-events:auto; }
+  .zoom-controls button { width:40px;height:36px;border:1px solid rgba(124,244,255,0.25);border-radius:10px;background:rgba(8,14,24,0.9);color:var(--text);font:inherit;font-size:0.82rem;cursor:pointer;backdrop-filter:blur(12px); }
+  .zoom-controls button:hover { border-color:rgba(124,244,255,0.45); }
+
+  /* Batch bar */
+  .batch-bar { position:fixed;top:20px;left:50%;transform:translateX(-50%);display:flex;gap:10px;align-items:center;padding:10px 16px;border:1px solid rgba(124,244,255,0.35);border-radius:14px;background:rgba(8,14,24,0.96);backdrop-filter:blur(16px);z-index:100;pointer-events:auto;font-size:0.82rem; }
+  .batch-bar button { border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.78);color:var(--text);border-radius:10px;padding:6px 12px;font:inherit;font-size:0.76rem;cursor:pointer; }
+
+  /* Quick launcher */
+  .launcher-overlay { position:fixed;inset:0;background:rgba(0,0,0,0.5);display:grid;place-items:center;z-index:200;pointer-events:auto; }
+  .launcher { width:min(480px,90vw);border:1px solid rgba(124,244,255,0.35);border-radius:18px;background:rgba(8,14,24,0.98);box-shadow:0 20px 60px rgba(0,0,0,0.6);padding:12px;backdrop-filter:blur(20px); }
+  .launcher__input { width:100%;border:1px solid rgba(124,244,255,0.22);background:rgba(8,15,26,0.8);color:var(--text);border-radius:14px;padding:14px 18px;font:inherit;font-size:1.1rem;outline:none; }
+  .launcher__input:focus { border-color:rgba(124,244,255,0.45); }
+  .launcher__results { display:flex;flex-direction:column;gap:4px;margin-top:8px;max-height:300px;overflow:auto; }
+  .launcher__item { border:none;background:transparent;color:var(--text);border-radius:10px;padding:10px 14px;font:inherit;font-size:0.88rem;text-align:left;cursor:pointer; }
+  .launcher__item:hover,.launcher__item--active { background:rgba(124,244,255,0.1); }
+
+  /* Tooltip */
+  .tooltip { position:fixed;z-index:100;padding:8px 12px;border-radius:10px;background:rgba(8,14,24,0.96);border:1px solid rgba(124,244,255,0.25);color:var(--text);font-size:0.76rem;pointer-events:none;transform:translateX(-50%) translateY(-100%);white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis; }
+
+  @keyframes pulse { 0%,100%{opacity:0.45;transform:scale(0.82);} 50%{opacity:1;transform:scale(1.08);} }
 </style>

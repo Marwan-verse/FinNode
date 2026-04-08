@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "FinNode",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "tauri": {
     "systemTray": {
@@ -54,7 +54,7 @@
         "skipTaskbar": true,
         "resizable": false,
         "visible": false,
-        "center": true
+        "center": false
       }
     ]
   }

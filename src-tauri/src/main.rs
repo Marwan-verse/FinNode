@@ -3,604 +3,856 @@
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
-  fs,
-  fs::{File, OpenOptions},
-  io,
-  path::{Path, PathBuf},
-  process::Command,
-  sync::{Arc, Mutex, OnceLock},
-  thread,
+    fs,
+    fs::{File, OpenOptions},
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, Mutex, OnceLock},
+    thread,
 };
 use fs2::FileExt;
 use tauri::{
-  AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
-  SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
+    AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
+    SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
 };
 
 static APP_INSTANCE_LOCK: OnceLock<File> = OnceLock::new();
 
+// ── Win32 FFI ────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn SetWindowPos(hwnd: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+    fn SetWindowLongW(hwnd: isize, index: i32, new_long: i32) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+const HWND_BOTTOM: isize = 1;
+#[cfg(target_os = "windows")]
+const SWP_NOACTIVATE: u32 = 0x0010;
+#[cfg(target_os = "windows")]
+const SWP_SHOWWINDOW: u32 = 0x0040;
+#[cfg(target_os = "windows")]
+const GWL_EXSTYLE: i32 = -20;
+#[cfg(target_os = "windows")]
+const WS_EX_NOACTIVATE: i32 = 0x08000000u32 as i32;
+#[cfg(target_os = "windows")]
+const WS_EX_TOOLWINDOW: i32 = 0x00000080;
+#[cfg(target_os = "windows")]
+const WS_EX_APPWINDOW: i32 = 0x00040000;
+
+// ── Data Models ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MacroStep {
+    action: String,
+    value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LaunchTargets {
-  path: Option<String>,
-  editor: Option<String>,
-  browser: Option<String>,
-  script: Option<String>,
+    path: Option<String>,
+    editor: Option<String>,
+    browser: Option<String>,
+    script: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectNode {
-  id: String,
-  name: String,
-  icon: String,
-  description: String,
-  x: f64,
-  y: f64,
-  links: Vec<String>,
-  targets: LaunchTargets,
+    id: String,
+    name: String,
+    icon: String,
+    description: String,
+    x: f64,
+    y: f64,
+    links: Vec<String>,
+    targets: LaunchTargets,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    macros: Vec<MacroStep>,
+    #[serde(default)]
+    collapsed: bool,
+    #[serde(default)]
+    last_launched: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct ProjectLayout {
-  nodes: Vec<ProjectNode>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Workspace {
+    id: String,
+    name: String,
+    nodes: Vec<ProjectNode>,
+    #[serde(default = "default_zoom")]
+    zoom: f64,
+    #[serde(default)]
+    pan_x: f64,
+    #[serde(default)]
+    pan_y: f64,
 }
+
+fn default_zoom() -> f64 { 1.0 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryEntry {
+    timestamp: String,
+    node_name: String,
+    action: String,
+    command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppLayout {
+    #[serde(default = "default_workspace_id")]
+    active_workspace: String,
+    workspaces: Vec<Workspace>,
+    #[serde(default)]
+    command_history: Vec<HistoryEntry>,
+}
+
+fn default_workspace_id() -> String { "default".into() }
+
+impl Default for AppLayout {
+    fn default() -> Self {
+        Self {
+            active_workspace: "default".into(),
+            workspaces: vec![default_workspace()],
+            command_history: vec![],
+        }
+    }
+}
+
+// Legacy format for migration
+#[derive(Debug, Deserialize)]
+struct LegacyLayout {
+    nodes: Vec<ProjectNode>,
+}
+
+// ── App State ────────────────────────────────────────────────────────────────
 
 struct AppState {
-  layout_path: PathBuf,
-  cached_layout: Arc<Mutex<ProjectLayout>>,
-  stealth: Arc<Mutex<bool>>,
-  desktop_visible: Arc<Mutex<bool>>,
-  desktop_click_through: Arc<Mutex<bool>>,
+    layout_path: PathBuf,
+    cached_layout: Arc<Mutex<AppLayout>>,
+    stealth: Arc<Mutex<bool>>,
+    desktop_visible: Arc<Mutex<bool>>,
+    desktop_click_through: Arc<Mutex<bool>>,
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn load_layout(state: State<'_, AppState>) -> Result<AppLayout, String> {
+    let layout = read_layout(&state.layout_path).unwrap_or_default();
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    *cache = layout.clone();
+    Ok(layout)
 }
 
 #[tauri::command]
-fn load_layout(state: State<'_, AppState>) -> Result<ProjectLayout, String> {
-  let layout = read_layout(&state.layout_path).unwrap_or_else(|_| default_layout());
-  let mut cache = state.cached_layout.lock().map_err(|_| "layout cache lock poisoned".to_string())?;
-  *cache = layout.clone();
-  Ok(layout)
+fn save_layout(state: State<'_, AppState>, layout: AppLayout) -> Result<(), String> {
+    write_layout(&state.layout_path, &layout)?;
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    *cache = layout;
+    Ok(())
 }
 
 #[tauri::command]
-fn save_layout(state: State<'_, AppState>, layout: ProjectLayout) -> Result<(), String> {
-  write_layout(&state.layout_path, &layout)?;
-  let mut cache = state.cached_layout.lock().map_err(|_| "layout cache lock poisoned".to_string())?;
-  *cache = layout;
-  Ok(())
+fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) -> Result<(), String> {
+    let command_str = match action.as_str() {
+        "open-path" => node.targets.path.clone().unwrap_or_default(),
+        "open-editor" => node.targets.editor.clone().or(node.targets.path.clone()).unwrap_or_default(),
+        "open-browser" => node.targets.browser.clone().unwrap_or_default(),
+        "run-script" => node.targets.script.clone().unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    match action.as_str() {
+        "open-path" => {
+            if let Some(path) = &node.targets.path { open_target(path)?; }
+        }
+        "open-editor" => {
+            if let Some(path) = node.targets.editor.as_ref().or(node.targets.path.as_ref()) {
+                launch_code(path)?;
+            }
+        }
+        "open-browser" => {
+            if let Some(url) = &node.targets.browser { open_target(url)?; }
+        }
+        "run-script" => {
+            if let Some(script) = &node.targets.script {
+                run_script(script, node.targets.path.as_deref())?;
+            }
+        }
+        _ => return Err(format!("unknown action: {action}")),
+    }
+
+    // Record to history
+    let entry = HistoryEntry {
+        timestamp: chrono_now(),
+        node_name: node.name.clone(),
+        action: action.clone(),
+        command: command_str,
+    };
+    if let Ok(mut cache) = state.cached_layout.lock() {
+        cache.command_history.insert(0, entry);
+        cache.command_history.truncate(50);
+        let _ = write_layout(&state.layout_path, &cache);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
-fn launch_node(node: ProjectNode, action: String) -> Result<(), String> {
-  match action.as_str() {
-    "open-path" => {
-      if let Some(path) = node.targets.path {
-        open_target(&path)?;
-      }
-    }
-    "open-editor" => {
-      if let Some(path) = node.targets.editor.or(node.targets.path.clone()) {
-        launch_code(&path)?;
-      }
-    }
-    "open-browser" => {
-      if let Some(url) = node.targets.browser {
-        open_target(&url)?;
-      }
-    }
-    "run-script" => {
-      if let Some(script) = node.targets.script {
-        run_script(&script, node.targets.path.as_deref())?;
-      }
-    }
-    _ => return Err(format!("unknown action: {action}")),
-  }
+fn run_node_macro(steps: Vec<MacroStep>) -> Result<(), String> {
+    thread::spawn(move || {
+        for step in &steps {
+            match step.action.as_str() {
+                "open-path" | "open-browser" => { let _ = open_target(&step.value); }
+                "run-script" => { let _ = run_script(&step.value, None); }
+                "open-editor" => { let _ = launch_code(&step.value); }
+                "delay" => {
+                    let ms: u64 = step.value.parse().unwrap_or(1000);
+                    thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
 
-  Ok(())
+#[tauri::command]
+fn get_command_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
+    let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    Ok(cache.command_history.clone())
+}
+
+#[tauri::command]
+fn clear_command_history(state: State<'_, AppState>) -> Result<(), String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    cache.command_history.clear();
+    let _ = write_layout(&state.layout_path, &cache);
+    Ok(())
+}
+
+#[tauri::command]
+fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
+    let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    Ok(cache.workspaces.clone())
+}
+
+#[tauri::command]
+fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Workspace, String> {
+    let ws = Workspace {
+        id: format!("ws-{}", rand_id()),
+        name,
+        nodes: vec![],
+        zoom: 1.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+    };
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    cache.workspaces.push(ws.clone());
+    let _ = write_layout(&state.layout_path, &cache);
+    Ok(ws)
+}
+
+#[tauri::command]
+fn switch_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<AppLayout, String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    if !cache.workspaces.iter().any(|w| w.id == workspace_id) {
+        return Err("workspace not found".into());
+    }
+    cache.active_workspace = workspace_id;
+    let _ = write_layout(&state.layout_path, &cache);
+    Ok(cache.clone())
+}
+
+#[tauri::command]
+fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<(), String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    if cache.workspaces.len() <= 1 {
+        return Err("cannot delete last workspace".into());
+    }
+    cache.workspaces.retain(|w| w.id != workspace_id);
+    if cache.active_workspace == workspace_id {
+        cache.active_workspace = cache.workspaces[0].id.clone();
+    }
+    let _ = write_layout(&state.layout_path, &cache);
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_workspace(state: State<'_, AppState>, workspace_id: String, name: String) -> Result<(), String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    if let Some(ws) = cache.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+        ws.name = name;
+    }
+    let _ = write_layout(&state.layout_path, &cache);
+    Ok(())
 }
 
 #[tauri::command]
 fn set_stealth_mode(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  update_stealth_mode(&app, &state, enabled)
+    update_stealth_mode(&app, &state, enabled)
 }
 
 #[tauri::command]
 fn set_desktop_visibility(app: AppHandle, state: State<'_, AppState>, visible: bool) -> Result<(), String> {
-  apply_desktop_mode(&app, &state, visible)
+    apply_desktop_mode(&app, &state, visible)
 }
 
 #[tauri::command]
 fn set_desktop_click_through(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  update_desktop_click_through(&app, &state, enabled)
-}
-
-fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  {
-    let mut click_through = state
-      .desktop_click_through
-      .lock()
-      .map_err(|_| "desktop click-through lock poisoned".to_string())?;
-    *click_through = enabled;
-  }
-
-  if let Some(desktop) = app.get_window("desktop") {
-    apply_desktop_click_through(&desktop, enabled)?;
-  }
-
-  let _ = app.emit_all("desktop-click-through-changed", enabled);
-  Ok(())
+    update_desktop_click_through(&app, &state, enabled)
 }
 
 #[tauri::command]
 fn hide_main_window(window: Window) -> Result<(), String> {
-  window.hide().map_err(|err| err.to_string())
+    window.hide().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn show_main_window(app: AppHandle) -> Result<(), String> {
-  let window = app.get_window("main").ok_or_else(|| "main window not found".to_string())?;
-  let _ = window.set_decorations(false);
-  let _ = window.set_resizable(false);
-  window.show().map_err(|err| err.to_string())?;
-  window.unminimize().map_err(|err| err.to_string())?;
-  window.set_focus().map_err(|err| err.to_string())
+    let window = app.get_window("main").ok_or("main window not found")?;
+    let _ = window.set_decorations(false);
+    let _ = window.set_resizable(false);
+    window.show().map_err(|e| e.to_string())?;
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn show_settings_view(app: AppHandle, _state: State<'_, AppState>) -> Result<(), String> {
-  show_main_window(app.clone())?;
-  let _ = app.emit_all("open-settings-tab", "general");
-  Ok(())
+    show_main_window(app.clone())?;
+    let _ = app.emit_all("open-settings-tab", "general");
+    Ok(())
 }
 
-fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: bool) -> Result<(), String> {
-  {
-    let mut desktop_visible = state
-      .desktop_visible
-      .lock()
-      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
-    *desktop_visible = visible;
-  }
-
-  let desktop = app
-    .get_window("desktop")
-    .ok_or_else(|| "desktop window not found".to_string())?;
-
-  if visible {
-    let _ = desktop.set_decorations(false);
-    let _ = desktop.set_skip_taskbar(true);
-    let _ = desktop.set_always_on_top(false);
-    let _ = desktop.set_resizable(false);
-    desktop.show().map_err(|err| err.to_string())?;
-    let _ = desktop.unminimize();
-    desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
-
-    let click_through_enabled = *state
-      .desktop_click_through
-      .lock()
-      .map_err(|_| "desktop click-through lock poisoned".to_string())?;
-    apply_desktop_click_through(&desktop, click_through_enabled)?;
-  } else {
-    let _ = apply_desktop_click_through(&desktop, false);
-    let _ = desktop.set_fullscreen(false);
-    let _ = desktop.hide();
-  }
-
-  let _ = app.emit_all("desktop-visibility-changed", visible);
-  Ok(())
-}
-
-fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), String> {
-  window.set_ignore_cursor_events(enabled).map_err(|err| err.to_string())?;
-  Ok(())
+#[tauri::command]
+fn pin_desktop_bottom(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if let Some(desktop) = app.get_window("desktop") {
+        set_window_bottom(&desktop)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn exit_app(app: AppHandle) {
-  app.exit(0);
+    app.exit(0);
 }
 
-fn build_system_tray() -> SystemTray {
-  let open_item = CustomMenuItem::new("open-settings", "Open Settings");
-  let stealth_item = CustomMenuItem::new("toggle-stealth", "Toggle Stealth");
-  let desktop_item = CustomMenuItem::new("toggle-desktop", "Show/Hide Desktop Nodes");
-  let click_through_item = CustomMenuItem::new("toggle-click-through", "Toggle Desktop Click-Through");
-  let exit_item = CustomMenuItem::new("exit", "Exit");
-  let tray_menu = SystemTrayMenu::new()
-    .add_item(open_item)
-    .add_item(stealth_item)
-    .add_item(desktop_item)
-    .add_item(click_through_item)
-    .add_native_item(SystemTrayMenuItem::Separator)
-    .add_item(exit_item);
+// ── Win32 Helpers ────────────────────────────────────────────────────────────
 
-  SystemTray::new().with_menu(tray_menu)
-}
+#[cfg(target_os = "windows")]
+fn setup_desktop_widget(window: &Window) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
 
-fn main() {
-  if let Err(error) = ensure_single_instance() {
-    eprintln!("{error}");
-    return;
-  }
-
-  tauri::Builder::default()
-    .system_tray(build_system_tray())
-    .manage(create_state())
-    .on_system_tray_event(|app, event| match event {
-      SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
-        "open-settings" => {
-          let state = app.state::<AppState>();
-          let _ = show_settings_view(app.clone(), state);
-        }
-        "toggle-stealth" => {
-          let state = app.state::<AppState>();
-          let next_enabled = match state.stealth.lock() {
-            Ok(mut stealth) => {
-              *stealth = !*stealth;
-              *stealth
-            }
-            Err(_) => {
-              eprintln!("failed to toggle stealth mode from tray: lock poisoned");
-              return;
-            }
-          };
-
-          let _ = update_stealth_mode(&app, &state, next_enabled);
-        }
-        "toggle-desktop" => {
-          let state = app.state::<AppState>();
-          let next_visible = match state.desktop_visible.lock() {
-            Ok(desktop_visible) => {
-              !*desktop_visible
-            }
-            Err(_) => {
-              eprintln!("failed to toggle desktop visibility from tray: lock poisoned");
-              return;
-            }
-          };
-
-          let _ = apply_desktop_mode(&app, &state, next_visible);
-        }
-        "toggle-click-through" => {
-          let state = app.state::<AppState>();
-          let next_enabled = match state.desktop_click_through.lock() {
-            Ok(click_through) => !*click_through,
-            Err(_) => {
-              eprintln!("failed to toggle desktop click-through from tray: lock poisoned");
-              return;
-            }
-          };
-
-          let _ = update_desktop_click_through(&app, &state, next_enabled);
-        }
-        "exit" => app.exit(0),
-        _ => {}
-      },
-      SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
-        let state = app.state::<AppState>();
-        let _ = show_settings_view(app.clone(), state);
-      }
-      _ => {}
-    })
-    .on_window_event(|event| {
-      if let WindowEvent::CloseRequested { api, .. } = event.event() {
-        api.prevent_close();
-        if event.window().label() == "desktop" {
-          let app = event.window().app_handle();
-          let state = app.state::<AppState>();
-          let _ = apply_desktop_mode(&app, &state, false);
-          return;
-        }
-
-        if event.window().label() == "main" {
-          let _ = event.window().hide();
-        }
-      }
-    })
-    .setup(|app| {
-      let window = app.get_window("main").expect("main window");
-      if let Some(desktop_window) = app.get_window("desktop") {
-        let _ = desktop_window.hide();
-      }
-
-      let _ = window.set_resizable(false);
-      let _ = window.set_decorations(false);
-      let state = app.state::<AppState>();
-      let layout = read_layout(&state.layout_path).unwrap_or_else(|_| default_layout());
-      let _ = write_layout(&state.layout_path, &layout);
-      *state.cached_layout.lock().expect("cache") = layout;
-
-      if let Err(error) = register_shortcuts(app.handle()) {
-        eprintln!("failed to register global shortcut: {error}");
-      }
-      spawn_layout_watcher(app.handle(), state.layout_path.clone());
-      Ok(())
-    })
-    .invoke_handler(tauri::generate_handler![
-      load_layout,
-      save_layout,
-      launch_node,
-      set_stealth_mode,
-      set_desktop_visibility,
-      set_desktop_click_through,
-      hide_main_window,
-      show_main_window,
-      show_settings_view,
-      exit_app
-    ])
-    .run(tauri::generate_context!())
-    .expect("error while running FinNode");
-}
-
-fn ensure_single_instance() -> Result<(), String> {
-  let lock_dir = tauri::api::path::config_dir()
-    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    .join("FinNode");
-  fs::create_dir_all(&lock_dir).map_err(|err| err.to_string())?;
-
-  let lock_path = lock_dir.join("app.lock");
-  let file = OpenOptions::new()
-    .read(true)
-    .write(true)
-    .create(true)
-    .open(&lock_path)
-    .map_err(|err| err.to_string())?;
-
-  file
-    .try_lock_exclusive()
-    .map_err(|_| "FinNode is already running. Close the existing app first.".to_string())?;
-
-  let _ = APP_INSTANCE_LOCK.set(file);
-  Ok(())
-}
-
-fn create_state() -> AppState {
-  let base_dir = config_dir().unwrap_or_else(|_| {
-    std::env::current_dir()
-      .unwrap_or_else(|_| PathBuf::from("."))
-      .join("FinNode")
-  });
-  let layout_path = base_dir.join("config.json");
-  AppState {
-    layout_path,
-    cached_layout: Arc::new(Mutex::new(ProjectLayout::default())),
-    stealth: Arc::new(Mutex::new(false)),
-    desktop_visible: Arc::new(Mutex::new(false)),
-    desktop_click_through: Arc::new(Mutex::new(false)),
-  }
-}
-
-fn register_shortcuts(app: AppHandle) -> Result<(), String> {
-  let stealth_shortcut = "Alt+S";
-  let click_through_shortcut = "Alt+I";
-  let app_for_stealth = app.clone();
-
-  app.global_shortcut_manager()
-    .register(stealth_shortcut, move || {
-      let state = app_for_stealth.state::<AppState>();
-      let next_enabled = match state.stealth.lock() {
-        Ok(mut stealth) => {
-          *stealth = !*stealth;
-          *stealth
-        }
-        Err(_) => {
-          eprintln!("failed to toggle stealth mode: lock poisoned");
-          return;
-        }
-      };
-
-      if let Err(error) = update_stealth_mode(&app_for_stealth, &state, next_enabled) {
-        eprintln!("failed to update stealth mode: {error}");
-        return;
-      }
-    })
-    .map_err(|err| err.to_string())?;
-
-  let app_for_click_through = app.clone();
-  app.global_shortcut_manager()
-    .register(click_through_shortcut, move || {
-      let state = app_for_click_through.state::<AppState>();
-      let next_enabled = match state.desktop_click_through.lock() {
-        Ok(click_through) => !*click_through,
-        Err(_) => {
-          eprintln!("failed to toggle desktop click-through: lock poisoned");
-          return;
-        }
-      };
-
-      if let Err(error) = update_desktop_click_through(&app_for_click_through, &state, next_enabled) {
-        eprintln!("failed to update desktop click-through: {error}");
-      }
-    })
-    .map_err(|err| err.to_string())
-}
-
-fn spawn_layout_watcher(app: AppHandle, layout_path: PathBuf) {
-  thread::spawn(move || {
-    let path_for_event = layout_path.clone();
-    let app_for_event = app.clone();
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-      if result.is_ok() {
-        if let Ok(layout) = read_layout(&path_for_event) {
-          let _ = app_for_event.emit_all("layout-updated", layout);
-        }
-      }
-    })
-    .expect("layout watcher");
-
-    watcher
-      .watch(&layout_path, RecursiveMode::NonRecursive)
-      .expect("watch layout file");
-
-    loop {
-      thread::park();
+    unsafe {
+        let ex = GetWindowLongW(raw, GWL_EXSTYLE);
+        let new_ex = (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+        SetWindowLongW(raw, GWL_EXSTYLE, new_ex);
     }
-  });
+
+    // Size to primary monitor
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let size = monitor.size();
+        let pos = monitor.position();
+        unsafe {
+            SetWindowPos(
+                raw, HWND_BOTTOM,
+                pos.x as i32, pos.y as i32,
+                size.width as i32, size.height as i32,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    Ok(())
 }
 
-fn default_layout() -> ProjectLayout {
-  ProjectLayout {
-    nodes: vec![
-      ProjectNode {
-        id: "core-reef".into(),
-        name: "Core Reef".into(),
-        icon: "⟐".into(),
-        description: "Launches the main project folder and editor.".into(),
-        x: 120.0,
-        y: 110.0,
-        links: vec!["tool-spine".into(), "signal-drift".into()],
-        targets: LaunchTargets {
-          path: Some(".".into()),
-          editor: Some(".".into()),
-          browser: Some("https://example.com".into()),
-          script: Some("npm run build:web".into()),
-        },
-      },
-      ProjectNode {
-        id: "tool-spine".into(),
-        name: "Tool Spine".into(),
-        icon: "◈".into(),
-        description: "Utilities, folders, and workspace shortcuts.".into(),
-        x: 430.0,
-        y: 210.0,
-        links: vec!["research-fin".into()],
-        targets: LaunchTargets {
-          path: Some(".".into()),
-          editor: Some(".".into()),
-          browser: Some("https://github.com".into()),
-          script: Some("npm run build:web".into()),
-        },
-      },
-      ProjectNode {
-        id: "research-fin".into(),
-        name: "Research Fin".into(),
-        icon: "⬡".into(),
-        description: "A context node for docs, links, and references.".into(),
-        x: 760.0,
-        y: 140.0,
-        links: vec!["signal-drift".into()],
-        targets: LaunchTargets {
-          path: Some(".".into()),
-          editor: Some(".".into()),
-          browser: Some("https://crates.io".into()),
-          script: Some("cargo check".into()),
-        },
-      },
-      ProjectNode {
-        id: "signal-drift".into(),
-        name: "Signal Drift".into(),
-        icon: "⟁".into(),
-        description: "A live node for scripts and browser targets.".into(),
-        x: 540.0,
-        y: 460.0,
-        links: vec![],
-        targets: LaunchTargets {
-          path: Some(".".into()),
-          editor: Some(".".into()),
-          browser: Some("https://www.rust-lang.org".into()),
-          script: Some("cargo fmt".into()),
-        },
-      },
-    ],
-  }
+#[cfg(target_os = "windows")]
+fn set_window_bottom(window: &Window) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    unsafe {
+        SetWindowPos(raw, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOACTIVATE | 0x0001 | 0x0002);
+    }
+    Ok(())
 }
+
+// ── Desktop Mode ─────────────────────────────────────────────────────────────
+
+fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: bool) -> Result<(), String> {
+    {
+        let mut dv = state.desktop_visible.lock().map_err(|_| "lock poisoned")?;
+        *dv = visible;
+    }
+
+    let desktop = app.get_window("desktop").ok_or("desktop window not found")?;
+
+    if visible {
+        let _ = desktop.set_decorations(false);
+        let _ = desktop.set_skip_taskbar(true);
+        let _ = desktop.set_always_on_top(false);
+        let _ = desktop.set_resizable(false);
+        desktop.show().map_err(|e| e.to_string())?;
+        let _ = desktop.unminimize();
+
+        #[cfg(target_os = "windows")]
+        setup_desktop_widget(&desktop)?;
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = desktop.set_fullscreen(true);
+        }
+
+        let ct = *state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
+        apply_desktop_click_through(&desktop, ct)?;
+    } else {
+        let _ = apply_desktop_click_through(&desktop, false);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = desktop.set_fullscreen(false);
+        }
+        let _ = desktop.hide();
+    }
+
+    let _ = app.emit_all("desktop-visibility-changed", visible);
+    Ok(())
+}
+
+fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), String> {
+    window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())
+}
+
+fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    {
+        let mut ct = state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
+        *ct = enabled;
+    }
+    if let Some(desktop) = app.get_window("desktop") {
+        apply_desktop_click_through(&desktop, enabled)?;
+    }
+    let _ = app.emit_all("desktop-click-through-changed", enabled);
+    Ok(())
+}
+
+// ── Stealth Mode ─────────────────────────────────────────────────────────────
 
 fn update_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  {
-    let mut stealth = state.stealth.lock().map_err(|_| "stealth lock poisoned".to_string())?;
-    *stealth = enabled;
-  }
-
-  apply_stealth_mode(app, state, enabled)?;
-  let _ = app.emit_all("stealth-changed", enabled);
-  Ok(())
+    {
+        let mut s = state.stealth.lock().map_err(|_| "lock poisoned")?;
+        *s = enabled;
+    }
+    apply_stealth_mode(app, state, enabled)?;
+    let _ = app.emit_all("stealth-changed", enabled);
+    Ok(())
 }
 
 fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
-  let main = app.get_window("main").ok_or_else(|| "main window not found".to_string())?;
-  let desktop = app.get_window("desktop").ok_or_else(|| "desktop window not found".to_string())?;
+    let main = app.get_window("main").ok_or("main window not found")?;
+    let desktop = app.get_window("desktop").ok_or("desktop window not found")?;
 
-  if enabled {
-    let _ = main.hide();
-    let _ = desktop.hide();
-  } else {
-    main.show().map_err(|err| err.to_string())?;
-    let _ = main.unminimize();
-    main.set_focus().map_err(|err| err.to_string())?;
+    if enabled {
+        let _ = main.hide();
+        let _ = desktop.hide();
+    } else {
+        main.show().map_err(|e| e.to_string())?;
+        let _ = main.unminimize();
+        main.set_focus().map_err(|e| e.to_string())?;
 
-    let desktop_visible = state
-      .desktop_visible
-      .lock()
-      .map_err(|_| "desktop visibility lock poisoned".to_string())?;
-    if *desktop_visible {
-      desktop.show().map_err(|err| err.to_string())?;
-      let _ = desktop.unminimize();
-      desktop.set_fullscreen(true).map_err(|err| err.to_string())?;
+        let dv = *state.desktop_visible.lock().map_err(|_| "lock poisoned")?;
+        if dv {
+            desktop.show().map_err(|e| e.to_string())?;
+            let _ = desktop.unminimize();
 
-      let click_through_enabled = *state
-        .desktop_click_through
-        .lock()
-        .map_err(|_| "desktop click-through lock poisoned".to_string())?;
-      apply_desktop_click_through(&desktop, click_through_enabled)?;
+            #[cfg(target_os = "windows")]
+            setup_desktop_widget(&desktop)?;
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = desktop.set_fullscreen(true);
+            }
+
+            let ct = *state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
+            apply_desktop_click_through(&desktop, ct)?;
+        }
     }
-  }
-
-  Ok(())
+    Ok(())
 }
 
-fn config_dir() -> Result<PathBuf, String> {
-  tauri::api::path::config_dir()
-    .ok_or_else(|| "unable to resolve data directory".to_string())
-    .map(|base| base.join("FinNode"))
+// ── Layout I/O ───────────────────────────────────────────────────────────────
+
+fn read_layout(path: &Path) -> Result<AppLayout, String> {
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+
+    // Try new format first
+    if let Ok(layout) = serde_json::from_str::<AppLayout>(&text) {
+        if !layout.workspaces.is_empty() {
+            return Ok(layout);
+        }
+    }
+
+    // Try legacy format (just nodes array)
+    if let Ok(legacy) = serde_json::from_str::<LegacyLayout>(&text) {
+        return Ok(AppLayout {
+            active_workspace: "default".into(),
+            workspaces: vec![Workspace {
+                id: "default".into(),
+                name: "Default".into(),
+                nodes: legacy.nodes,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            }],
+            command_history: vec![],
+        });
+    }
+
+    Err("failed to parse layout".into())
 }
 
-fn read_layout(path: &Path) -> Result<ProjectLayout, String> {
-  let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
-  serde_json::from_str(&text).map_err(|err| err.to_string())
+fn write_layout(path: &Path, layout: &AppLayout) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(layout).map_err(|e| e.to_string())?;
+    fs::write(path, text).map_err(|e| e.to_string())
 }
 
-fn write_layout(path: &Path, layout: &ProjectLayout) -> Result<(), String> {
-  if let Some(parent) = path.parent() {
-    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-  }
-  let text = serde_json::to_string_pretty(layout).map_err(|err| err.to_string())?;
-  fs::write(path, text).map_err(|err| err.to_string())
+// ── Default Data ─────────────────────────────────────────────────────────────
+
+fn default_workspace() -> Workspace {
+    Workspace {
+        id: "default".into(),
+        name: "Default".into(),
+        nodes: default_nodes(),
+        zoom: 1.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+    }
+}
+
+fn default_nodes() -> Vec<ProjectNode> {
+    vec![
+        ProjectNode {
+            id: "core-reef".into(), name: "Core Reef".into(), icon: "⟐".into(),
+            description: "Launches the main project folder and editor.".into(),
+            x: 120.0, y: 110.0,
+            links: vec!["tool-spine".into(), "signal-drift".into()],
+            targets: LaunchTargets {
+                path: Some(".".into()), editor: Some(".".into()),
+                browser: Some("https://example.com".into()), script: Some("npm run build:web".into()),
+            },
+            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+        },
+        ProjectNode {
+            id: "tool-spine".into(), name: "Tool Spine".into(), icon: "◈".into(),
+            description: "Utilities, folders, and workspace shortcuts.".into(),
+            x: 430.0, y: 210.0,
+            links: vec!["research-fin".into()],
+            targets: LaunchTargets {
+                path: Some(".".into()), editor: Some(".".into()),
+                browser: Some("https://github.com".into()), script: Some("npm run build:web".into()),
+            },
+            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+        },
+        ProjectNode {
+            id: "research-fin".into(), name: "Research Fin".into(), icon: "⬡".into(),
+            description: "A context node for docs, links, and references.".into(),
+            x: 760.0, y: 140.0,
+            links: vec!["signal-drift".into()],
+            targets: LaunchTargets {
+                path: Some(".".into()), editor: Some(".".into()),
+                browser: Some("https://crates.io".into()), script: Some("cargo check".into()),
+            },
+            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+        },
+        ProjectNode {
+            id: "signal-drift".into(), name: "Signal Drift".into(), icon: "⟁".into(),
+            description: "A live node for scripts and browser targets.".into(),
+            x: 540.0, y: 460.0, links: vec![],
+            targets: LaunchTargets {
+                path: Some(".".into()), editor: Some(".".into()),
+                browser: Some("https://www.rust-lang.org".into()), script: Some("cargo fmt".into()),
+            },
+            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+        },
+    ]
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+
+fn rand_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{:x}", n)
+}
+
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 fn open_target(target: &str) -> Result<(), String> {
-  open::that(target).map(|_| ()).map_err(|err| err.to_string())
+    open::that(target).map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn launch_code(path: &str) -> Result<(), String> {
-  let candidates: &[&str] = if cfg!(target_os = "windows") {
-    &["code.cmd", "code", "Code.exe", "code-insiders.cmd", "code-insiders"]
-  } else {
-    &["code", "code-insiders"]
-  };
-
-  for candidate in candidates {
-    match Command::new(candidate).arg(path).spawn() {
-      Ok(_) => return Ok(()),
-      Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-      Err(err) => return Err(err.to_string()),
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
+        &["code.cmd", "code", "Code.exe", "code-insiders.cmd", "code-insiders"]
+    } else {
+        &["code", "code-insiders"]
+    };
+    for c in candidates {
+        match Command::new(c).arg(path).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        }
     }
-  }
-
-  open::that(path).map(|_| ()).map_err(|err| err.to_string())
+    open::that(path).map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn run_script(script: &str, cwd: Option<&str>) -> Result<(), String> {
-  let mut command = if cfg!(target_os = "windows") {
-    let mut command = Command::new("cmd");
-    command.args(["/C", script]);
-    command
-  } else {
-    let mut command = Command::new("sh");
-    command.args(["-lc", script]);
-    command
-  };
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", script]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-lc", script]);
+        c
+    };
+    if let Some(cwd) = cwd { cmd.current_dir(cwd); }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
 
-  if let Some(cwd) = cwd {
-    command.current_dir(cwd);
-  }
+fn config_dir() -> Result<PathBuf, String> {
+    tauri::api::path::config_dir()
+        .ok_or_else(|| "unable to resolve data directory".into())
+        .map(|base| base.join("FinNode"))
+}
 
-  command.spawn().map(|_| ()).map_err(|err| err.to_string())
+fn ensure_single_instance() -> Result<(), String> {
+    let lock_dir = tauri::api::path::config_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("FinNode");
+    fs::create_dir_all(&lock_dir).map_err(|e| e.to_string())?;
+    let lock_path = lock_dir.join("app.lock");
+    let file = OpenOptions::new().read(true).write(true).create(true)
+        .open(&lock_path).map_err(|e| e.to_string())?;
+    file.try_lock_exclusive()
+        .map_err(|_| "FinNode is already running. Close the existing app first.".to_string())?;
+    let _ = APP_INSTANCE_LOCK.set(file);
+    Ok(())
+}
+
+fn create_state() -> AppState {
+    let base_dir = config_dir().unwrap_or_else(|_| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("FinNode")
+    });
+    AppState {
+        layout_path: base_dir.join("config.json"),
+        cached_layout: Arc::new(Mutex::new(AppLayout::default())),
+        stealth: Arc::new(Mutex::new(false)),
+        desktop_visible: Arc::new(Mutex::new(true)),
+        desktop_click_through: Arc::new(Mutex::new(false)),
+    }
+}
+
+// ── System Tray ──────────────────────────────────────────────────────────────
+
+fn build_system_tray() -> SystemTray {
+    let menu = SystemTrayMenu::new()
+        .add_item(CustomMenuItem::new("open-settings", "Open Settings"))
+        .add_item(CustomMenuItem::new("toggle-stealth", "Toggle Stealth"))
+        .add_item(CustomMenuItem::new("toggle-desktop", "Show/Hide Desktop Nodes"))
+        .add_item(CustomMenuItem::new("toggle-click-through", "Toggle Click-Through"))
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(CustomMenuItem::new("exit", "Exit"));
+    SystemTray::new().with_menu(menu)
+}
+
+// ── Shortcuts ────────────────────────────────────────────────────────────────
+
+fn register_shortcuts(app: AppHandle) -> Result<(), String> {
+    let app1 = app.clone();
+    app.global_shortcut_manager()
+        .register("Alt+S", move || {
+            let state = app1.state::<AppState>();
+            let next = match state.stealth.lock() {
+                Ok(mut s) => { *s = !*s; *s }
+                Err(_) => return,
+            };
+            let _ = update_stealth_mode(&app1, &state, next);
+        })
+        .map_err(|e| e.to_string())?;
+
+    let app2 = app.clone();
+    app.global_shortcut_manager()
+        .register("Alt+I", move || {
+            let state = app2.state::<AppState>();
+            let next = match state.desktop_click_through.lock() {
+                Ok(ct) => !*ct,
+                Err(_) => return,
+            };
+            let _ = update_desktop_click_through(&app2, &state, next);
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Quick launcher shortcut
+    let app3 = app.clone();
+    app.global_shortcut_manager()
+        .register("Alt+Space", move || {
+            let _ = app3.emit_all("toggle-quick-launcher", true);
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ── Layout Watcher ───────────────────────────────────────────────────────────
+
+fn spawn_layout_watcher(app: AppHandle, layout_path: PathBuf) {
+    thread::spawn(move || {
+        let path = layout_path.clone();
+        let app_ref = app.clone();
+        let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+            if result.is_ok() {
+                if let Ok(layout) = read_layout(&path) {
+                    let _ = app_ref.emit_all("layout-updated", layout);
+                }
+            }
+        }).expect("layout watcher");
+        watcher.watch(&layout_path, RecursiveMode::NonRecursive).expect("watch layout file");
+        loop { thread::park(); }
+    });
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() {
+    if let Err(e) = ensure_single_instance() {
+        eprintln!("{e}");
+        return;
+    }
+
+    tauri::Builder::default()
+        .system_tray(build_system_tray())
+        .manage(create_state())
+        .on_system_tray_event(|app, event| match event {
+            SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
+                "open-settings" => {
+                    let state = app.state::<AppState>();
+                    let _ = show_settings_view(app.clone(), state);
+                }
+                "toggle-stealth" => {
+                    let state = app.state::<AppState>();
+                    let next = match state.stealth.lock() {
+                        Ok(mut s) => { *s = !*s; *s }
+                        Err(_) => return,
+                    };
+                    let _ = update_stealth_mode(app, &state, next);
+                }
+                "toggle-desktop" => {
+                    let state = app.state::<AppState>();
+                    let next = match state.desktop_visible.lock() {
+                        Ok(dv) => !*dv,
+                        Err(_) => return,
+                    };
+                    let _ = apply_desktop_mode(app, &state, next);
+                }
+                "toggle-click-through" => {
+                    let state = app.state::<AppState>();
+                    let next = match state.desktop_click_through.lock() {
+                        Ok(ct) => !*ct,
+                        Err(_) => return,
+                    };
+                    let _ = update_desktop_click_through(app, &state, next);
+                }
+                "exit" => app.exit(0),
+                _ => {}
+            },
+            SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
+                let state = app.state::<AppState>();
+                let _ = show_settings_view(app.clone(), state);
+            }
+            _ => {}
+        })
+        .on_window_event(|event| {
+            if let WindowEvent::CloseRequested { api, .. } = event.event() {
+                api.prevent_close();
+                if event.window().label() == "desktop" {
+                    let app = event.window().app_handle();
+                    let state = app.state::<AppState>();
+                    let _ = apply_desktop_mode(&app, &state, false);
+                    return;
+                }
+                if event.window().label() == "main" {
+                    let _ = event.window().hide();
+                }
+            }
+        })
+        .setup(|app| {
+            let window = app.get_window("main").expect("main window");
+            let _ = window.set_resizable(false);
+            let _ = window.set_decorations(false);
+
+            let state = app.state::<AppState>();
+            let layout = read_layout(&state.layout_path).unwrap_or_default();
+            let _ = write_layout(&state.layout_path, &layout);
+            *state.cached_layout.lock().expect("cache") = layout;
+
+            if let Err(e) = register_shortcuts(app.handle()) {
+                eprintln!("failed to register shortcuts: {e}");
+            }
+            spawn_layout_watcher(app.handle(), state.layout_path.clone());
+
+            // Auto-show desktop overlay as widget
+            if let Some(desktop) = app.get_window("desktop") {
+                let _ = desktop.set_decorations(false);
+                let _ = desktop.set_skip_taskbar(true);
+                let _ = desktop.set_always_on_top(false);
+                let _ = desktop.set_resizable(false);
+                let _ = desktop.show();
+
+                #[cfg(target_os = "windows")]
+                {
+                    if let Err(e) = setup_desktop_widget(&desktop) {
+                        eprintln!("failed to setup desktop widget: {e}");
+                    }
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = desktop.set_fullscreen(true);
+                }
+            }
+
+            // Show main settings window
+            let _ = window.show();
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            load_layout, save_layout, launch_node, run_node_macro,
+            set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
+            hide_main_window, show_main_window, show_settings_view, exit_app,
+            pin_desktop_bottom,
+            list_workspaces, create_workspace, switch_workspace, delete_workspace, rename_workspace,
+            get_command_history, clear_command_history
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running FinNode");
 }
