@@ -50,9 +50,8 @@
   let selectedIds = new Set(), lastClickWasSelect = false;
   // Quick launcher
   let showLauncher = false, launcherQuery = '', launcherIndex = 0;
-  // Desktop hit regions (Windows)
-  let hitRegionFrame = null;
-  const HIT_REGION_PADDING = 0;
+  // Node bounds update (for cursor polling click-through)
+  let boundsFrame = null;
   // Tooltip
   let hoveredId = null, tooltipPos = {x:0,y:0}, tooltipTimer = null;
   // Highlight connections
@@ -63,7 +62,7 @@
   let settings = loadSettings();
   // Platform
   let osPlatform = 'windows';
-  let supportsHitRegions = true;
+  let supportsClickThrough = true;
 
   function isLockedNode(nodeOrId) {
     const id = typeof nodeOrId === 'string' ? nodeOrId : nodeOrId?.id;
@@ -150,7 +149,7 @@
 
   $: { renderNodes = nodes.map(n => { const s = smoothNodes.find(i=>i.id===n.id); const raw = draggingId===n.id; return {...n, renderX: raw?n.x:(s?s.x:n.x), renderY: raw?n.y:(s?s.y:n.y)}; }); }
   $: isDesktopWindow = currentWindowLabel === 'desktop';
-  $: supportsHitRegions = osPlatform === 'windows' || osPlatform === 'linux';
+  $: supportsClickThrough = osPlatform === 'windows' || osPlatform === 'linux';
   $: { if (typeof document !== 'undefined') {
     document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
     document.body.classList.toggle('is-stealth', stealth);
@@ -163,8 +162,8 @@
   $: editNode = editPopup.nodeId ? nodes.find(n=>n.id===editPopup.nodeId) : null;
   $: launcherResults = launcherQuery.trim() ? nodes.filter(n=>n.name.toLowerCase().includes(launcherQuery.toLowerCase())).slice(0,8) : nodes.slice(0,8);
 
-  function nodeRef(el, id) { nodeElements.set(id, el); queueRender(); return { destroy() { nodeElements.delete(id); scheduleHitRegions(); } }; }
-  function queueRender() { void tick().then(()=>{ renderConnections(); scheduleHitRegions(); }); }
+  function nodeRef(el, id) { nodeElements.set(id, el); queueRender(); return { destroy() { nodeElements.delete(id); scheduleBoundsUpdate(); } }; }
+  function queueRender() { void tick().then(()=>{ renderConnections(); scheduleBoundsUpdate(); }); }
 
   async function detectPlatform() {
     try {
@@ -179,42 +178,36 @@
     }
   }
 
-  function collectHitRects() {
+  /** Schedule a bounding-box update for the cursor-polling thread. */
+  function scheduleBoundsUpdate() {
+    if (!isDesktopWindow) return;
+    if (boundsFrame !== null) return;
+    boundsFrame = requestAnimationFrame(()=>{
+      boundsFrame = null;
+      void syncNodeBounds();
+    });
+  }
+
+  /** Send screen-space bounding boxes of all interactive elements to Rust. */
+  async function syncNodeBounds() {
+    if (!isDesktopWindow) return;
     const rects = [];
     for (const el of nodeElements.values()) rects.push(el.getBoundingClientRect());
+    // Also include popups/overlays so they remain interactive
     if (typeof document !== 'undefined') {
       document.querySelectorAll('.context-menu, .node-editor-popup, .batch-bar, .launcher-overlay').forEach(el=>{
         rects.push(el.getBoundingClientRect());
       });
     }
-    return rects;
-  }
-
-  function scheduleHitRegions() {
-    if (!isDesktopWindow || !supportsHitRegions) return;
-    if (hitRegionFrame !== null) return;
-    hitRegionFrame = requestAnimationFrame(()=>{
-      hitRegionFrame = null;
-      void syncHitRegions();
-    });
-  }
-
-  async function syncHitRegions() {
-    if (!isDesktopWindow || !supportsHitRegions) return;
-    if (!showDesktop || !settings.nodes.clickThrough) {
-      try { await invoke('clear_desktop_hit_regions'); } catch (e) { updateStatus(String(e)); }
-      return;
-    }
-    const rects = collectHitRects();
     let scale = 1;
     try { scale = await appWindow.scaleFactor(); } catch {}
-    const regions = rects.map(r=>({
-      left: Math.round((r.left - HIT_REGION_PADDING) * scale),
-      top: Math.round((r.top - HIT_REGION_PADDING) * scale),
-      right: Math.round((r.right + HIT_REGION_PADDING) * scale),
-      bottom: Math.round((r.bottom + HIT_REGION_PADDING) * scale)
+    const bounds = rects.map(r=>({
+      left: r.left * scale,
+      top: r.top * scale,
+      right: r.right * scale,
+      bottom: r.bottom * scale
     })).filter(r=>r.right > r.left && r.bottom > r.top);
-    try { await invoke('set_desktop_hit_regions', { regions }); } catch (e) { updateStatus(String(e)); }
+    try { await invoke('update_node_bounds', { bounds }); } catch (e) { /* silent */ }
   }
 
   function startSpring() { if (nodeSpringFrame !== null) return; nodeSpringFrame = requestAnimationFrame(stepSpring); }
@@ -243,7 +236,7 @@
   async function syncDesktopVis(v) { try { await invoke('set_desktop_visibility',{visible:v}); } catch(e) { updateStatus(String(e)); } }
   async function syncDesktopCT(e) { try { await invoke('set_desktop_click_through',{enabled:e}); } catch(e2) { updateStatus(String(e2)); } }
   function updateDesktopCT(en,sync=true) {
-    if (!supportsHitRegions) {
+    if (!supportsClickThrough) {
       updateSettings(d=>{d.nodes.clickThrough=false;});
       if (sync) void syncDesktopCT(false);
       updateStatus(`Background click-through not supported on ${osPlatform}`);
@@ -251,7 +244,7 @@
     }
     updateSettings(d=>{d.nodes.clickThrough=Boolean(en);});
     if(sync) void syncDesktopCT(Boolean(en));
-    scheduleHitRegions();
+    scheduleBoundsUpdate();
   }
 
   function applyDesktopVis(vis,sync=true) {
@@ -260,8 +253,8 @@
     if(sync) void syncDesktopVis(showDesktop);
     queueRender();
   }
-  function closeCtx() { if(contextMenu.open){ contextMenu={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleHitRegions); } }
-  function closeEditor() { if(editPopup.open){ editPopup={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleHitRegions); } }
+  function closeCtx() { if(contextMenu.open){ contextMenu={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleBoundsUpdate); } }
+  function closeEditor() { if(editPopup.open){ editPopup={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleBoundsUpdate); } }
   function openEditor(nid) {
     if (isLockedNode(nid)) return;
     const n=nodes.find(i=>i.id===nid), el=nodeElements.get(nid);
@@ -273,7 +266,7 @@
     editDraft={name:n.name??'',description:n.description??'',path:n.targets?.path??'',browser:n.targets?.browser??'',script:n.targets?.script??'',color:n.color||'cyan',macros:[...(n.macros||[])]};
     editSelectedLinks=[...(n.links??[])];
     editPopup={open:true,x,y,nodeId:nid};
-    void tick().then(scheduleHitRegions);
+    void tick().then(scheduleBoundsUpdate);
   }
   function toggleEditLink(tid,en) { editSelectedLinks = en ? [...new Set([...editSelectedLinks,tid])] : editSelectedLinks.filter(i=>i!==tid); }
   function saveEditor() {
@@ -295,14 +288,14 @@
     if (isLockedNode(nid)) return;
     expandedNodeId = expandedNodeId===nid ? null : nid;
     if(expandedNodeId!==nid) closeEditor();
-    void tick().then(scheduleHitRegions);
+    void tick().then(scheduleBoundsUpdate);
   }
   function openEditorSoon(nid) { expandedNodeId=nid; void tick().then(()=>openEditor(nid)); }
   function openCtxMenu(ev,nid) {
     ev.preventDefault(); ev.stopPropagation();
     closeEditor();
     contextMenu={open:true, x:Math.max(10,Math.min(ev.clientX,innerWidth-240)), y:Math.max(10,Math.min(ev.clientY,innerHeight-300)), nodeId:nid};
-    void tick().then(scheduleHitRegions);
+    void tick().then(scheduleBoundsUpdate);
   }
 
   // Context menu actions
@@ -317,14 +310,14 @@
     if(!ev.ctrlKey&&!ev.metaKey) return false;
     const next = new Set(selectedIds);
     if(next.has(nid)) next.delete(nid); else next.add(nid);
-    selectedIds = next; lastClickWasSelect = true; scheduleHitRegions(); return true;
+    selectedIds = next; lastClickWasSelect = true; scheduleBoundsUpdate(); return true;
   }
-  function batchLaunch() { for(const id of selectedIds) { const n=nodes.find(i=>i.id===id); if(n) void launchNode(n,'open-path'); } selectedIds=new Set(); scheduleHitRegions(); }
-  function batchDelete() { for(const id of selectedIds) deleteNode(id); selectedIds=new Set(); scheduleHitRegions(); }
+  function batchLaunch() { for(const id of selectedIds) { const n=nodes.find(i=>i.id===id); if(n) void launchNode(n,'open-path'); } selectedIds=new Set(); scheduleBoundsUpdate(); }
+  function batchDelete() { for(const id of selectedIds) deleteNode(id); selectedIds=new Set(); scheduleBoundsUpdate(); }
 
   // Quick launcher
-  function openLauncher() { showLauncher=true; launcherQuery=''; launcherIndex=0; void tick().then(()=>{const el=document.getElementById('launcher-input'); if(el)el.focus(); scheduleHitRegions();}); }
-  function closeLauncher() { showLauncher=false; launcherQuery=''; void tick().then(scheduleHitRegions); }
+  function openLauncher() { showLauncher=true; launcherQuery=''; launcherIndex=0; void tick().then(()=>{const el=document.getElementById('launcher-input'); if(el)el.focus(); scheduleBoundsUpdate();}); }
+  function closeLauncher() { showLauncher=false; launcherQuery=''; void tick().then(scheduleBoundsUpdate); }
   function launcherKey(ev) {
     if(ev.key==='Escape'){closeLauncher();return;}
     if(ev.key==='ArrowDown'){launcherIndex=Math.min(launcherIndex+1,launcherResults.length-1);return;}
@@ -478,8 +471,8 @@
   async function bootstrap() {
     const ul1=await listen('stealth-changed',({payload})=>{stealth=Boolean(payload);updateStatus(`Stealth ${stealth?'on':'off'}`);});
     const ul2=await listen('layout-updated',async()=>{await loadWorkspaces();});
-    const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){expandedNodeId=null;closeCtx();closeEditor();} scheduleHitRegions();}else applyDesktopVis(v,false);});
-    const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);}); scheduleHitRegions();});
+    const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){expandedNodeId=null;closeCtx();closeEditor();} scheduleBoundsUpdate();}else applyDesktopVis(v,false);});
+    const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);}); scheduleBoundsUpdate();});
     const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
     const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
 
@@ -498,7 +491,7 @@
     window.addEventListener('pointerup',onUp); window.addEventListener('pointerdown',onDown);
     window.addEventListener('keydown',onKey);
 
-    return ()=>{ ul1();ul2();ul3();ul4();ul5();ul6(); window.removeEventListener('resize',onResize); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp); window.removeEventListener('pointerdown',onDown); window.removeEventListener('keydown',onKey); if(saveTimer)clearTimeout(saveTimer); if(dragFrame!==null)cancelAnimationFrame(dragFrame); if(nodeSpringFrame!==null)cancelAnimationFrame(nodeSpringFrame); if(hitRegionFrame!==null)cancelAnimationFrame(hitRegionFrame); };
+    return ()=>{ ul1();ul2();ul3();ul4();ul5();ul6(); window.removeEventListener('resize',onResize); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp); window.removeEventListener('pointerdown',onDown); window.removeEventListener('keydown',onKey); if(saveTimer)clearTimeout(saveTimer); if(dragFrame!==null)cancelAnimationFrame(dragFrame); if(nodeSpringFrame!==null)cancelAnimationFrame(nodeSpringFrame); if(boundsFrame!==null)cancelAnimationFrame(boundsFrame); };
   }
 
   onMount(()=>{
@@ -695,7 +688,7 @@
         {:else if activeTab==='nodes'}
           <div class="section__title">Desktop Nodes</div>
           <button class="chip" on:click={toggleDesktop}>{showDesktop?'Hide Desktop':'Show Desktop'}</button>
-          <label class="toggle-row"><span>Background click-through</span><input type="checkbox" checked={settings.nodes.clickThrough} disabled={!supportsHitRegions} on:change={ev=>updateDesktopCT(ev.currentTarget.checked)}/></label>
+          <label class="toggle-row"><span>Background click-through</span><input type="checkbox" checked={settings.nodes.clickThrough} disabled={!supportsClickThrough} on:change={ev=>updateDesktopCT(ev.currentTarget.checked)}/></label>
           <label class="slider-row"><span>Smoothness: {settings.nodes.smoothness.toFixed(2)}</span><input type="range" min="0.08" max="0.45" step="0.01" value={settings.nodes.smoothness} on:input={ev=>updateSettings(d=>{d.nodes.smoothness=Number(ev.currentTarget.value);})}/></label>
           <div class="section__title" style="margin-top:14px;">Workspaces</div>
           <div class="template-row">

@@ -26,16 +26,15 @@ extern "system" {
     fn SetWindowPos(hwnd: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
     fn SetWindowLongW(hwnd: isize, index: i32, new_long: i32) -> i32;
-    fn SystemParametersInfoW(ui_action: u32, ui_param: u32, pv_param: *mut Rect, f_win_ini: u32) -> i32;
-    fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
-    fn CombineRgn(dest: isize, src1: isize, src2: isize, mode: i32) -> i32;
-    fn DeleteObject(obj: isize) -> i32;
-    fn SetWindowRgn(hwnd: isize, hrgn: isize, redraw: i32) -> i32;
+    fn SystemParametersInfoW(ui_action: u32, ui_param: u32, pv_param: *mut WinRect, f_win_ini: u32) -> i32;
+    // Subclassing: replace the window procedure
+    fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+    fn CallWindowProcW(prev_proc: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
 }
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
-struct Rect {
+struct WinRect {
     left: i32,
     top: i32,
     right: i32,
@@ -57,9 +56,26 @@ const WS_EX_TOOLWINDOW: i32 = 0x00000080;
 #[cfg(target_os = "windows")]
 const WS_EX_APPWINDOW: i32 = 0x00040000;
 #[cfg(target_os = "windows")]
-const RGN_OR: i32 = 2;
-#[cfg(target_os = "windows")]
 const SPI_GETWORKAREA: u32 = 0x0030;
+
+// WM_NCHITTEST constants
+#[cfg(target_os = "windows")]
+const GWLP_WNDPROC: i32 = -4;
+#[cfg(target_os = "windows")]
+const WM_NCHITTEST: u32 = 0x0084;
+#[cfg(target_os = "windows")]
+const HTTRANSPARENT: isize = -1;
+
+// ── Global State for WndProc ─────────────────────────────────────────────────
+// The subclassed window procedure needs access to node bounds and settings.
+// We use global statics since wndprocs can't capture closures.
+
+#[cfg(target_os = "windows")]
+static ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
+#[cfg(target_os = "windows")]
+static WNDPROC_NODE_BOUNDS: OnceLock<Arc<Mutex<Vec<NodeBound>>>> = OnceLock::new();
+#[cfg(target_os = "windows")]
+static WNDPROC_CLICK_THROUGH: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 
 // ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -77,12 +93,13 @@ struct LaunchTargets {
     script: Option<String>,
 }
 
+/// Bounding box in physical screen-space pixels (sent from the frontend).
 #[derive(Debug, Clone, Deserialize)]
-struct HitRegion {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+struct NodeBound {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +182,8 @@ struct AppState {
     stealth: Arc<Mutex<bool>>,
     desktop_visible: Arc<Mutex<bool>>,
     desktop_click_through: Arc<Mutex<bool>>,
+    /// Bounding boxes of all interactive elements (nodes, popups, etc.)
+    node_bounds: Arc<Mutex<Vec<NodeBound>>>,
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -215,7 +234,6 @@ fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) ->
         _ => return Err(format!("unknown action: {action}")),
     }
 
-    // Record to history
     let entry = HistoryEntry {
         timestamp: chrono_now(),
         node_name: node.name.clone(),
@@ -341,41 +359,12 @@ fn set_desktop_click_through(app: AppHandle, state: State<'_, AppState>, enabled
     update_desktop_click_through(&app, &state, enabled)
 }
 
+/// Frontend sends the screen-space bounding boxes of all interactive elements.
+/// The subclassed WM_NCHITTEST handler reads these to decide hit-test results.
 #[tauri::command]
-fn set_desktop_hit_regions(app: AppHandle, regions: Vec<HitRegion>) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let window = app.get_window("desktop").ok_or("desktop window not found")?;
-        apply_window_hit_regions(&window, &regions)?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let window = app.get_window("desktop").ok_or("desktop window not found")?;
-        apply_window_hit_regions(&window, &regions)?;
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = (app, regions);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn clear_desktop_hit_regions(app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let window = app.get_window("desktop").ok_or("desktop window not found")?;
-        clear_window_hit_regions(&window)?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let window = app.get_window("desktop").ok_or("desktop window not found")?;
-        clear_window_hit_regions(&window)?;
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = app;
-    }
+fn update_node_bounds(state: State<'_, AppState>, bounds: Vec<NodeBound>) -> Result<(), String> {
+    let mut nb = state.node_bounds.lock().map_err(|_| "lock poisoned")?;
+    *nb = bounds;
     Ok(())
 }
 
@@ -431,8 +420,8 @@ fn setup_desktop_widget(window: &Window) -> Result<(), String> {
     // Size to Windows work area so the taskbar stays visible.
     let mut applied = false;
     unsafe {
-        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut Rect, 0) != 0 {
+        let mut rect = WinRect { left: 0, top: 0, right: 0, bottom: 0 };
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut WinRect, 0) != 0 {
             let width = rect.right - rect.left;
             let height = rect.bottom - rect.top;
             if width > 0 && height > 0 {
@@ -447,7 +436,6 @@ fn setup_desktop_widget(window: &Window) -> Result<(), String> {
         }
     }
 
-    // Fallback to primary monitor if work area is unavailable.
     if !applied {
         if let Ok(Some(monitor)) = window.primary_monitor() {
             let size = monitor.size();
@@ -476,140 +464,96 @@ fn set_window_bottom(window: &Window) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<(), String> {
-    use std::sync::mpsc;
-
-    let window = window.clone();
-    let window_for_thread = window.clone();
-    let regions = regions.to_vec();
-    let (tx, rx) = mpsc::channel();
-
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            let hwnd = window_for_thread.hwnd().map_err(|e| e.to_string())?;
-            let raw = hwnd.0 as isize;
-            let valid: Vec<HitRegion> = regions
-                .into_iter()
-                .filter(|r| r.right > r.left && r.bottom > r.top)
-                .collect();
-
-            unsafe {
-                let region = if let Some(r) = valid.first() {
-                    CreateRectRgn(r.left, r.top, r.right, r.bottom)
-                } else {
-                    CreateRectRgn(0, 0, 0, 0)
-                };
-                if region == 0 {
-                    return Err("CreateRectRgn failed".into());
-                }
-
-                for r in valid.iter().skip(1) {
-                    let next = CreateRectRgn(r.left, r.top, r.right, r.bottom);
-                    if next == 0 {
-                        continue;
-                    }
-                    CombineRgn(region, region, next, RGN_OR);
-                    DeleteObject(next);
-                }
-
-                if SetWindowRgn(raw, region, 1) == 0 {
-                    return Err("SetWindowRgn failed".into());
-                }
-            }
-
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
-
-    rx.recv().unwrap_or_else(|_| Err("failed to update hit regions".into()))
-}
+// ── WM_NCHITTEST Subclassing ─────────────────────────────────────────────────
+// This is the core click-through mechanism. Instead of polling or toggling
+// set_ignore_cursor_events, we intercept WM_NCHITTEST directly in the
+// Windows message loop.
+//
+// For every mouse event, Windows asks our window: "Is this point yours?"
+// We answer:
+//   HTTRANSPARENT (-1) → "No, pass this click to whatever is behind me"
+//   (default)          → "Yes, I want this click" → WebView2 gets it
+//
+// This is event-driven, zero-latency, and deterministic.
 
 #[cfg(target_os = "windows")]
-fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
-    use std::sync::mpsc;
+unsafe extern "system" fn desktop_wndproc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    if msg == WM_NCHITTEST {
+        // Check if click-through is enabled in settings
+        let ct_enabled = WNDPROC_CLICK_THROUGH
+            .get()
+            .and_then(|ct| ct.lock().ok())
+            .map(|ct| *ct)
+            .unwrap_or(false);
 
-    let window = window.clone();
-    let window_for_thread = window.clone();
-    let (tx, rx) = mpsc::channel();
+        if ct_enabled {
+            // Extract screen coordinates from LPARAM (handles multi-monitor negative coords)
+            let x = (lparam & 0xFFFF) as i16 as i32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            let hwnd = window_for_thread.hwnd().map_err(|e| e.to_string())?;
-            let raw = hwnd.0 as isize;
-            unsafe {
-                if SetWindowRgn(raw, 0, 1) == 0 {
-                    return Err("SetWindowRgn failed".into());
-                }
+            // Check if cursor is within any interactive bounding box
+            let over_interactive = WNDPROC_NODE_BOUNDS
+                .get()
+                .and_then(|bounds| bounds.lock().ok())
+                .map(|bounds| {
+                    let pad = 6.0; // small padding for easier targeting
+                    bounds.iter().any(|b| {
+                        (x as f64) >= (b.left - pad)
+                            && (x as f64) <= (b.right + pad)
+                            && (y as f64) >= (b.top - pad)
+                            && (y as f64) <= (b.bottom + pad)
+                    })
+                })
+                .unwrap_or(false);
+
+            if !over_interactive {
+                // Not over a node → click passes through to desktop/apps below
+                return HTTRANSPARENT;
             }
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
+        }
+        // Over a node or click-through disabled → fall through to WebView2
+    }
 
-    rx.recv().unwrap_or_else(|_| Err("failed to clear hit regions".into()))
+    // All other messages (and node clicks) → original window procedure
+    let orig = ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
+    if orig != 0 {
+        CallWindowProcW(orig, hwnd, msg, wparam, lparam)
+    } else {
+        0
+    }
 }
 
-#[cfg(target_os = "linux")]
-fn apply_window_hit_regions(window: &Window, regions: &[HitRegion]) -> Result<(), String> {
-    use cairo::{RectangleInt, Region};
-    use gtk::prelude::WidgetExt;
-    use std::sync::mpsc;
+/// Replace the desktop window's message procedure with our custom one.
+/// Must be called AFTER the window is shown and configured.
+#[cfg(target_os = "windows")]
+fn subclass_desktop_window(
+    window: &Window,
+    node_bounds: Arc<Mutex<Vec<NodeBound>>>,
+    click_through: Arc<Mutex<bool>>,
+) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
 
-    let window = window.clone();
-    let regions = regions.to_vec();
-    let (tx, rx) = mpsc::channel();
+    // Store shared state in globals so the wndproc can access them
+    let _ = WNDPROC_NODE_BOUNDS.set(node_bounds);
+    let _ = WNDPROC_CLICK_THROUGH.set(click_through);
 
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            let gtk_window = window.gtk_window().map_err(|e| e.to_string())?;
-            let gdk_window = gtk_window.window().ok_or("gdk window not available")?;
-            let region = Region::create();
-            for r in regions.iter() {
-                if r.right <= r.left || r.bottom <= r.top {
-                    continue;
-                }
-                let rect = RectangleInt {
-                    x: r.left,
-                    y: r.top,
-                    width: r.right - r.left,
-                    height: r.bottom - r.top,
-                };
-                region.union_rectangle(&rect).map_err(|e| e.to_string())?;
-            }
-            gdk_window.input_shape_combine_region(&region, 0, 0);
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
+    // Replace the window procedure, saving the original
+    let original = unsafe {
+        SetWindowLongPtrW(raw, GWLP_WNDPROC, desktop_wndproc as isize)
+    };
 
-    rx.recv().unwrap_or_else(|_| Err("failed to update hit regions".into()))
-}
+    if original == 0 {
+        return Err("SetWindowLongPtrW failed to subclass window".into());
+    }
 
-#[cfg(target_os = "linux")]
-fn clear_window_hit_regions(window: &Window) -> Result<(), String> {
-    use cairo::{RectangleInt, Region};
-    use gtk::prelude::WidgetExt;
-    use std::sync::mpsc;
-
-    let window = window.clone();
-    let (tx, rx) = mpsc::channel();
-
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            let gtk_window = window.gtk_window().map_err(|e| e.to_string())?;
-            let gdk_window = gtk_window.window().ok_or("gdk window not available")?;
-            let (_, _, width, height) = gdk_window.geometry();
-            let rect = RectangleInt { x: 0, y: 0, width, height };
-            let region = Region::create_rectangle(&rect);
-            gdk_window.input_shape_combine_region(&region, 0, 0);
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
-
-    rx.recv().unwrap_or_else(|_| Err("failed to clear hit regions".into()))
+    let _ = ORIGINAL_WNDPROC.set(original);
+    Ok(())
 }
 
 // ── Desktop Mode ─────────────────────────────────────────────────────────────
@@ -638,10 +582,10 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
             let _ = desktop.set_fullscreen(true);
         }
 
-        let ct = *state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
-        apply_desktop_click_through(&desktop, ct)?;
+        // WebView2 must ALWAYS be hit-test visible (never ignore cursor events).
+        // The WM_NCHITTEST subclass handles click-through at the window level.
+        let _ = desktop.set_ignore_cursor_events(false);
     } else {
-        let _ = apply_desktop_click_through(&desktop, false);
         #[cfg(not(target_os = "windows"))]
         {
             let _ = desktop.set_fullscreen(false);
@@ -653,31 +597,13 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
     Ok(())
 }
 
-fn apply_desktop_click_through(window: &Window, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = enabled;
-        return window.set_ignore_cursor_events(false).map_err(|e| e.to_string());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = enabled;
-        return window.set_ignore_cursor_events(false).map_err(|e| e.to_string());
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        window.set_ignore_cursor_events(enabled).map_err(|e| e.to_string())
-    }
-}
-
 fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, enabled: bool) -> Result<(), String> {
     {
         let mut ct = state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
         *ct = enabled;
     }
-    if let Some(desktop) = app.get_window("desktop") {
-        apply_desktop_click_through(&desktop, enabled)?;
-    }
+    // The WM_NCHITTEST handler reads click_through state on every hit-test.
+    // No need to toggle anything here — it's instantly effective.
     let _ = app.emit_all("desktop-click-through-changed", enabled);
     Ok(())
 }
@@ -719,8 +645,7 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
                 let _ = desktop.set_fullscreen(true);
             }
 
-            let ct = *state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
-            apply_desktop_click_through(&desktop, ct)?;
+            let _ = desktop.set_ignore_cursor_events(false);
         }
     }
     Ok(())
@@ -731,14 +656,12 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
 fn read_layout(path: &Path) -> Result<AppLayout, String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
 
-    // Try new format first
     if let Ok(layout) = serde_json::from_str::<AppLayout>(&text) {
         if !layout.workspaces.is_empty() {
             return Ok(layout);
         }
     }
 
-    // Try legacy format (just nodes array)
     if let Ok(legacy) = serde_json::from_str::<LegacyLayout>(&text) {
         return Ok(AppLayout {
             active_workspace: "default".into(),
@@ -906,7 +829,8 @@ fn create_state() -> AppState {
         cached_layout: Arc::new(Mutex::new(AppLayout::default())),
         stealth: Arc::new(Mutex::new(false)),
         desktop_visible: Arc::new(Mutex::new(true)),
-        desktop_click_through: Arc::new(Mutex::new(false)),
+        desktop_click_through: Arc::new(Mutex::new(true)),
+        node_bounds: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -950,7 +874,6 @@ fn register_shortcuts(app: AppHandle) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
 
-    // Quick launcher shortcut
     let app3 = app.clone();
     app.global_shortcut_manager()
         .register("Alt+Space", move || {
@@ -1066,10 +989,22 @@ fn main() {
                 let _ = desktop.set_resizable(false);
                 let _ = desktop.show();
 
+                // Keep WebView2 hit-test visible (WM_NCHITTEST handles click-through)
+                let _ = desktop.set_ignore_cursor_events(false);
+
                 #[cfg(target_os = "windows")]
                 {
                     if let Err(e) = setup_desktop_widget(&desktop) {
                         eprintln!("failed to setup desktop widget: {e}");
+                    }
+
+                    // Subclass the window to intercept WM_NCHITTEST
+                    if let Err(e) = subclass_desktop_window(
+                        &desktop,
+                        state.node_bounds.clone(),
+                        state.desktop_click_through.clone(),
+                    ) {
+                        eprintln!("failed to subclass desktop window: {e}");
                     }
                 }
 
@@ -1079,7 +1014,6 @@ fn main() {
                 }
             }
 
-            // Show main settings window
             let _ = window.show();
 
             Ok(())
@@ -1087,7 +1021,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_layout, save_layout, launch_node, run_node_macro,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
-            set_desktop_hit_regions, clear_desktop_hit_regions,
+            update_node_bounds,
             get_platform,
             hide_main_window, show_main_window, show_settings_view, exit_app,
             pin_desktop_bottom,
