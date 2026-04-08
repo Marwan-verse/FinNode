@@ -545,7 +545,7 @@ fn subclass_desktop_window(
 
     // Replace the window procedure, saving the original
     let original = unsafe {
-        SetWindowLongPtrW(raw, GWLP_WNDPROC, desktop_wndproc as isize)
+        SetWindowLongPtrW(raw, GWLP_WNDPROC, desktop_wndproc as *const () as isize)
     };
 
     if original == 0 {
