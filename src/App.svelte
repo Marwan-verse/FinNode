@@ -26,6 +26,8 @@
     { id:'docs-hub', name:'Documentation Hub', icon:LOGO_ICON, description:'Notes, references, and quick links', browser:'https://doc.rust-lang.org', script:'npm run build:web' },
     { id:'research-stack', name:'Research Stack', icon:'⟁', description:'Context, ideas, and experiments', browser:'https://github.com/trending', script:'npm run build:web' }
   ];
+  const MAIN_NODE_ID = 'main-node';
+  const MAIN_NODE_NAME = 'main';
 
   let nodes = [], renderNodes = [], smoothNodes = [], links = [];
   let stealth = false, showDesktop = true, activeTab = 'general';
@@ -50,7 +52,7 @@
   let showLauncher = false, launcherQuery = '', launcherIndex = 0;
   // Desktop hit regions (Windows)
   let hitRegionFrame = null;
-  const HIT_REGION_PADDING = 8;
+  const HIT_REGION_PADDING = 0;
   // Tooltip
   let hoveredId = null, tooltipPos = {x:0,y:0}, tooltipTimer = null;
   // Highlight connections
@@ -59,6 +61,45 @@
   let commandHistory = [];
   // Theme
   let settings = loadSettings();
+
+  function isLockedNode(nodeOrId) {
+    const id = typeof nodeOrId === 'string' ? nodeOrId : nodeOrId?.id;
+    return id === MAIN_NODE_ID || Boolean(nodeOrId?.locked);
+  }
+  function createMainNode(anchor) {
+    let x = 80, y = 80;
+    if (anchor) {
+      x = Math.max(24, anchor.x - 140);
+      y = Math.max(24, anchor.y - 40);
+    }
+    return {
+      id: MAIN_NODE_ID,
+      name: MAIN_NODE_NAME,
+      icon: '',
+      description: '',
+      x, y,
+      links: [],
+      targets: { path:null, editor:null, browser:null, script:null },
+      color: 'cyan',
+      group: null,
+      macros: [],
+      collapsed: false,
+      last_launched: null,
+      locked: true
+    };
+  }
+  function ensureMainNode(list) {
+    let changed = false;
+    const next = list.map(n=>{
+      if (n.id !== MAIN_NODE_ID) return n;
+      const updated = {...n, name: MAIN_NODE_NAME, icon:'', locked:true};
+      if (updated.name !== n.name || updated.icon !== n.icon || updated.locked !== n.locked) changed = true;
+      return updated;
+    });
+    if (next.some(n=>n.id===MAIN_NODE_ID)) return { nodes:next, added: changed };
+    const anchor = next[0];
+    return { nodes:[createMainNode(anchor), ...next], added:true };
+  }
 
   function createDefaultSettings() {
     return {
@@ -184,7 +225,7 @@
 
   async function syncDesktopVis(v) { try { await invoke('set_desktop_visibility',{visible:v}); } catch(e) { updateStatus(String(e)); } }
   async function syncDesktopCT(e) { try { await invoke('set_desktop_click_through',{enabled:e}); } catch(e2) { updateStatus(String(e2)); } }
-  function updateDesktopCT(en,sync=true) { updateSettings(d=>{d.nodes.clickThrough=Boolean(en);}); if(sync) void syncDesktopCT(Boolean(en)); }
+  function updateDesktopCT(en,sync=true) { updateSettings(d=>{d.nodes.clickThrough=Boolean(en);}); if(sync) void syncDesktopCT(Boolean(en)); scheduleHitRegions(); }
 
   function applyDesktopVis(vis,sync=true) {
     showDesktop = Boolean(vis); closeCtx(); if(!vis){closeEditor();expandedNodeId=null;}
@@ -195,6 +236,7 @@
   function closeCtx() { if(contextMenu.open){ contextMenu={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleHitRegions); } }
   function closeEditor() { if(editPopup.open){ editPopup={open:false,x:0,y:0,nodeId:null}; void tick().then(scheduleHitRegions); } }
   function openEditor(nid) {
+    if (isLockedNode(nid)) return;
     const n=nodes.find(i=>i.id===nid), el=nodeElements.get(nid);
     if(!n||!el) return;
     const r=el.getBoundingClientRect(), pw=320, ph=420;
@@ -208,7 +250,7 @@
   }
   function toggleEditLink(tid,en) { editSelectedLinks = en ? [...new Set([...editSelectedLinks,tid])] : editSelectedLinks.filter(i=>i!==tid); }
   function saveEditor() {
-    if(!editPopup.nodeId) return;
+    if(!editPopup.nodeId || isLockedNode(editPopup.nodeId)) return;
     const nid=editPopup.nodeId;
     nodes=nodes.map(n=>{
       if(n.id!==nid) return n;
@@ -222,10 +264,17 @@
   function addMacroStep() { editDraft.macros = [...editDraft.macros, {action:'open-browser',value:''}]; }
   function removeMacroStep(i) { editDraft.macros = editDraft.macros.filter((_,idx)=>idx!==i); }
 
-  function toggleExpanded(nid) { expandedNodeId = expandedNodeId===nid ? null : nid; if(expandedNodeId!==nid) closeEditor(); void tick().then(scheduleHitRegions); }
+  function toggleExpanded(nid) {
+    if (isLockedNode(nid)) return;
+    expandedNodeId = expandedNodeId===nid ? null : nid;
+    if(expandedNodeId!==nid) closeEditor();
+    void tick().then(scheduleHitRegions);
+  }
   function openEditorSoon(nid) { expandedNodeId=nid; void tick().then(()=>openEditor(nid)); }
   function openCtxMenu(ev,nid) {
-    ev.preventDefault(); ev.stopPropagation(); expandedNodeId=nid; closeEditor();
+    ev.preventDefault(); ev.stopPropagation();
+    if (isLockedNode(nid)) return;
+    closeEditor();
     contextMenu={open:true, x:Math.max(10,Math.min(ev.clientX,innerWidth-240)), y:Math.max(10,Math.min(ev.clientY,innerHeight-300)), nodeId:nid};
     void tick().then(scheduleHitRegions);
   }
@@ -265,8 +314,30 @@
   }
 
   // Workspace management
-  async function loadWorkspaces() { try { const layout = await invoke('load_layout'); workspaces=layout.workspaces||[]; activeWorkspaceId=layout.active_workspace||'default'; commandHistory=layout.command_history||[]; const ws=workspaces.find(w=>w.id===activeWorkspaceId)||workspaces[0]; if(ws){nodes=ws.nodes||[];} syncSmooth(true); } catch(e) { updateStatus(String(e)); } }
-  async function switchWorkspace(id) { try { const layout=await invoke('switch_workspace',{workspaceId:id}); workspaces=layout.workspaces; activeWorkspaceId=layout.active_workspace; commandHistory=layout.command_history||[]; const ws=workspaces.find(w=>w.id===activeWorkspaceId); if(ws){nodes=ws.nodes||[];} syncSmooth(true); queueRender(); updateStatus(`Switched to ${ws?.name}`); } catch(e) { updateStatus(String(e)); } }
+  async function loadWorkspaces() {
+    try {
+      const layout = await invoke('load_layout');
+      workspaces=layout.workspaces||[]; activeWorkspaceId=layout.active_workspace||'default'; commandHistory=layout.command_history||[];
+      const ws=workspaces.find(w=>w.id===activeWorkspaceId)||workspaces[0];
+      if(ws){nodes=ws.nodes||[];}
+      const ensured = ensureMainNode(nodes);
+      nodes = ensured.nodes;
+      if (ensured.added) scheduleSave();
+      syncSmooth(true);
+    } catch(e) { updateStatus(String(e)); }
+  }
+  async function switchWorkspace(id) {
+    try {
+      const layout=await invoke('switch_workspace',{workspaceId:id});
+      workspaces=layout.workspaces; activeWorkspaceId=layout.active_workspace; commandHistory=layout.command_history||[];
+      const ws=workspaces.find(w=>w.id===activeWorkspaceId);
+      if(ws){nodes=ws.nodes||[];}
+      const ensured = ensureMainNode(nodes);
+      nodes = ensured.nodes;
+      if (ensured.added) scheduleSave();
+      syncSmooth(true); queueRender(); updateStatus(`Switched to ${ws?.name}`);
+    } catch(e) { updateStatus(String(e)); }
+  }
   async function createWorkspace() { if(!workspaceName.trim()) return; try { await invoke('create_workspace',{name:workspaceName.trim()}); workspaceName=''; await loadWorkspaces(); updateStatus('Workspace created'); } catch(e) { updateStatus(String(e)); } }
   async function deleteWorkspace(id) { try { await invoke('delete_workspace',{workspaceId:id}); await loadWorkspaces(); updateStatus('Workspace deleted'); } catch(e) { updateStatus(String(e)); } }
 
@@ -278,6 +349,7 @@
   async function launchNode(n,a) { try { await invoke('launch_node',{node:n,action:a}); updateStatus(`Launched ${n.name}`); } catch(e) { updateStatus(String(e)); } }
   async function runMacro(steps) { try { await invoke('run_node_macro',{steps}); updateStatus('Macro started'); } catch(e) { updateStatus(String(e)); } }
   async function toggleStealth() { try { await invoke('set_stealth_mode',{enabled:!stealth}); } catch(e) { updateStatus(String(e)); } }
+  async function openSettingsView() { try { await invoke('show_settings_view'); } catch(e) { updateStatus(String(e)); } }
   async function revealGhost() { if(!stealth) return; try { await invoke('set_stealth_mode',{enabled:false}); } catch(e) { updateStatus(String(e)); } }
   async function hideToTray() { try { await invoke('hide_main_window'); } catch(e) { updateStatus(String(e)); } }
   async function exitApp() { try { await invoke('exit_app'); } catch(e) { updateStatus(String(e)); } }
@@ -289,8 +361,20 @@
     const n={id:uid(t.id),name:'',icon:t.icon,description:'',x:90+off,y:110+off,links:[],targets:{path:null,editor:null,browser:null,script:null},color:'cyan',group:null,macros:[],collapsed:false,last_launched:null};
     nodes=[...nodes,n]; syncSmooth(true); scheduleSave(); updateStatus('Added node'); openEditorSoon(n.id);
   }
-  function cloneNode(id) { const n=nodes.find(i=>i.id===id); if(!n) return; nodes=[...nodes,{...n,id:uid(n.id),name:`${n.name} Copy`,x:n.x+26,y:n.y+26,links:[...(n.links??[])],targets:{...(n.targets??{})}}]; syncSmooth(true); scheduleSave(); }
-  function deleteNode(id) { if(contextMenu.nodeId===id)closeCtx(); if(editPopup.nodeId===id)closeEditor(); if(expandedNodeId===id)expandedNodeId=null; nodes=nodes.filter(n=>n.id!==id).map(n=>({...n,links:(n.links??[]).filter(l=>l!==id)})); syncSmooth(true); scheduleSave(); }
+  function cloneNode(id) {
+    if (isLockedNode(id)) return;
+    const n=nodes.find(i=>i.id===id); if(!n) return;
+    nodes=[...nodes,{...n,id:uid(n.id),name:`${n.name} Copy`,x:n.x+26,y:n.y+26,links:[...(n.links??[])],targets:{...(n.targets??{})},locked:false}];
+    syncSmooth(true); scheduleSave();
+  }
+  function deleteNode(id) {
+    if (isLockedNode(id)) { updateStatus('Main node is locked'); return; }
+    if(contextMenu.nodeId===id)closeCtx();
+    if(editPopup.nodeId===id)closeEditor();
+    if(expandedNodeId===id)expandedNodeId=null;
+    nodes=nodes.filter(n=>n.id!==id).map(n=>({...n,links:(n.links??[]).filter(l=>l!==id)}));
+    syncSmooth(true); scheduleSave();
+  }
   function moveNode(id,dir) { const i=nodes.findIndex(n=>n.id===id); if(i<0) return; const ti=i+dir; if(ti<0||ti>=nodes.length) return; const next=[...nodes]; const [m]=next.splice(i,1); next.splice(ti,0,m); nodes=next; scheduleSave(); }
 
   function scheduleSave() {
@@ -336,7 +420,14 @@
     const el=nodeElements.get(draggingId); if(el) el.classList.remove('is-dragging');
     draggingId=null;
     if(dragMoved){syncSmooth(true);scheduleSave();pinBottom();}
-    if(!dragMoved&&!lastClickWasSelect) toggleExpanded(rid);
+    if(!dragMoved&&!lastClickWasSelect) {
+      if (isLockedNode(rid)) {
+        expandedNodeId = null; closeEditor();
+        void openSettingsView();
+      } else {
+        toggleExpanded(rid);
+      }
+    }
     dragMoved=false; lastClickWasSelect=false;
   }
 
@@ -362,12 +453,12 @@
     const ul1=await listen('stealth-changed',({payload})=>{stealth=Boolean(payload);updateStatus(`Stealth ${stealth?'on':'off'}`);});
     const ul2=await listen('layout-updated',async()=>{await loadWorkspaces();});
     const ul3=await listen('desktop-visibility-changed',({payload})=>{const v=Boolean(payload); if(isDesktopWindow){showDesktop=v;if(!v){expandedNodeId=null;closeCtx();closeEditor();} scheduleHitRegions();}else applyDesktopVis(v,false);});
-    const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);});});
+    const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);}); scheduleHitRegions();});
     const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
     const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
 
     await loadWorkspaces();
-    if(isDesktopWindow) showDesktop=true;
+    if(isDesktopWindow) { showDesktop=true; await syncDesktopCT(settings.nodes.clickThrough); }
     else { showDesktop=settings.general.restoreLastMode?settings.general.lastMode==='desktop':settings.nodes.showDesktop; await syncDesktopVis(showDesktop); await syncDesktopCT(settings.nodes.clickThrough); }
     updateStatus(`Loaded ${nodes.length} nodes`); queueRender();
 
@@ -427,7 +518,9 @@
                   <div class="node__name">{node.name}</div>
                   <div class="node__meta">{node.id.slice(0,8)}</div>
                 </div>
-                <button class="node__edit-trigger" on:click|stopPropagation={()=>openEditor(node.id)}>Edit</button>
+                {#if !isLockedNode(node)}
+                  <button class="node__edit-trigger" on:click|stopPropagation={()=>openEditor(node.id)}>Edit</button>
+                {/if}
               </header>
               <p class="node__body">{node.description || 'A linked context node'}</p>
               {#if hasAnyActions(node)}
@@ -590,13 +683,14 @@
           </div>
           <div class="node-manager">
             {#each nodes as node, i (node.id)}
+              {@const locked = isLockedNode(node)}
               <div class="node-row">
                 <div class="node-row__title">{node.name||'(unnamed)'}</div>
                 <div class="node-row__actions">
                   <button on:click={()=>moveNode(node.id,-1)} disabled={i===0}>↑</button>
                   <button on:click={()=>moveNode(node.id,1)} disabled={i===nodes.length-1}>↓</button>
-                  <button on:click={()=>cloneNode(node.id)}>⧉</button>
-                  <button class="danger" on:click={()=>deleteNode(node.id)}>×</button>
+                  <button on:click={()=>cloneNode(node.id)} disabled={locked}>⧉</button>
+                  <button class="danger" on:click={()=>deleteNode(node.id)} disabled={locked}>×</button>
                 </div>
               </div>
             {/each}
@@ -700,7 +794,8 @@
   .link { fill:none;stroke:var(--line);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:stroke 200ms ease,stroke-width 200ms ease; }
   .link--highlight { stroke:var(--accent);stroke-width:3;filter:drop-shadow(0 0 8px var(--glow)); }
   .node-layer { padding:26px;pointer-events:none;transform-origin:0 0; }
-  .node { position:absolute;width:84px;height:84px;border-radius:50%;cursor:grab;user-select:none;will-change:left,top;z-index:2;pointer-events:auto;transition:left calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1),top calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1); }
+  .node { position:absolute;width:84px;height:84px;aspect-ratio:1 / 1;border-radius:50%;overflow:hidden;cursor:grab;user-select:none;will-change:left,top;z-index:2;pointer-events:auto;transition:left calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1),top calc(120ms * var(--motion-scale)) cubic-bezier(0.22,0.61,0.36,1); }
+  .node:not(.node--expanded) { min-height:84px;max-height:84px; }
   .node.node--expanded { width:272px;height:auto;min-height:190px;border-radius:22px;z-index:5; }
   .node--selected .node__surface { border-color:var(--accent) !important;box-shadow:0 0 20px var(--glow),0 12px 28px rgba(0,0,0,0.32) !important; }
   .node__surface { position:relative;width:100%;height:100%;display:grid;place-items:center;padding:12px;border-radius:inherit;background:linear-gradient(180deg,rgba(18,27,41,0.94),rgba(10,15,24,0.82));border:1px solid rgba(var(--nc),0.25);box-shadow:0 12px 28px rgba(0,0,0,0.32),0 0 calc(14px * var(--node-glow)) rgba(var(--nc),calc(0.14 * var(--node-glow))) inset;transition:transform calc(140ms * var(--motion-scale)) ease; }
