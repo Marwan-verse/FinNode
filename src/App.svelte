@@ -149,7 +149,7 @@
 
   $: { renderNodes = nodes.map(n => { const s = smoothNodes.find(i=>i.id===n.id); const raw = draggingId===n.id; return {...n, renderX: raw?n.x:(s?s.x:n.x), renderY: raw?n.y:(s?s.y:n.y)}; }); }
   $: isDesktopWindow = currentWindowLabel === 'desktop';
-  $: supportsClickThrough = osPlatform === 'windows' || osPlatform === 'linux';
+  $: supportsClickThrough = osPlatform === 'windows';
   $: { if (typeof document !== 'undefined') {
     document.documentElement.classList.toggle('desktop-overlay-window', isDesktopWindow);
     document.body.classList.toggle('is-stealth', stealth);
@@ -171,7 +171,7 @@
     } catch {
       osPlatform = 'windows';
     }
-    const supported = osPlatform === 'windows' || osPlatform === 'linux';
+    const supported = osPlatform === 'windows';
     if (!supported) {
       updateSettings(d=>{d.nodes.clickThrough=false;});
       void syncDesktopCT(false);
@@ -475,11 +475,32 @@
     const ul4=await listen('desktop-click-through-changed',({payload})=>{updateSettings(d=>{d.nodes.clickThrough=Boolean(payload);}); scheduleBoundsUpdate();});
     const ul5=await listen('open-settings-tab',({payload})=>{if(!isDesktopWindow)activeTab=typeof payload==='string'?payload:'general';});
     const ul6=await listen('toggle-quick-launcher',()=>{if(showLauncher)closeLauncher();else openLauncher();});
+    const ul7=await listen('desktop-hook-status',({payload})=>{
+      if (!payload || typeof payload !== 'object') return;
+      const ok = Boolean(payload.ok);
+      const detail = typeof payload.detail === 'string' ? payload.detail : '';
+      if (!ok && detail) updateStatus(detail);
+    });
+    const ul8=await listen('request-bounds-update',()=>{ void tick().then(syncNodeBounds); });
 
     await detectPlatform();
     await loadWorkspaces();
-    if(isDesktopWindow) { showDesktop=true; await syncDesktopCT(settings.nodes.clickThrough); }
-    else { showDesktop=settings.general.restoreLastMode?settings.general.lastMode==='desktop':settings.nodes.showDesktop; await syncDesktopVis(showDesktop); await syncDesktopCT(settings.nodes.clickThrough); }
+
+    // Startup policy: begin in click-through mode on supported platforms.
+    if (supportsClickThrough) {
+      updateSettings(d=>{d.nodes.clickThrough=true;});
+      await syncDesktopCT(true);
+    }
+
+    if(isDesktopWindow) {
+      showDesktop=true;
+      await tick();
+      await syncNodeBounds();
+    }
+    else {
+      showDesktop=settings.general.restoreLastMode?settings.general.lastMode==='desktop':settings.nodes.showDesktop;
+      await syncDesktopVis(showDesktop);
+    }
     updateStatus(`Loaded ${nodes.length} nodes`); queueRender();
 
     const onResize=()=>queueRender();
@@ -491,7 +512,7 @@
     window.addEventListener('pointerup',onUp); window.addEventListener('pointerdown',onDown);
     window.addEventListener('keydown',onKey);
 
-    return ()=>{ ul1();ul2();ul3();ul4();ul5();ul6(); window.removeEventListener('resize',onResize); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp); window.removeEventListener('pointerdown',onDown); window.removeEventListener('keydown',onKey); if(saveTimer)clearTimeout(saveTimer); if(dragFrame!==null)cancelAnimationFrame(dragFrame); if(nodeSpringFrame!==null)cancelAnimationFrame(nodeSpringFrame); if(boundsFrame!==null)cancelAnimationFrame(boundsFrame); };
+    return ()=>{ ul1();ul2();ul3();ul4();ul5();ul6();ul7();ul8(); window.removeEventListener('resize',onResize); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp); window.removeEventListener('pointerdown',onDown); window.removeEventListener('keydown',onKey); if(saveTimer)clearTimeout(saveTimer); if(dragFrame!==null)cancelAnimationFrame(dragFrame); if(nodeSpringFrame!==null)cancelAnimationFrame(nodeSpringFrame); if(boundsFrame!==null)cancelAnimationFrame(boundsFrame); };
   }
 
   onMount(()=>{

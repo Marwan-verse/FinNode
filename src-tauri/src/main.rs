@@ -102,6 +102,12 @@ struct NodeBound {
     bottom: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DesktopHookStatus {
+    ok: bool,
+    detail: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectNode {
     id: String,
@@ -539,9 +545,18 @@ fn subclass_desktop_window(
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
 
+    if raw == 0 {
+        return Err("invalid desktop window handle".into());
+    }
+
     // Store shared state in globals so the wndproc can access them
-    let _ = WNDPROC_NODE_BOUNDS.set(node_bounds);
-    let _ = WNDPROC_CLICK_THROUGH.set(click_through);
+    let _ = WNDPROC_NODE_BOUNDS.get_or_init(|| node_bounds);
+    let _ = WNDPROC_CLICK_THROUGH.get_or_init(|| click_through);
+
+    // Already hooked for this process.
+    if ORIGINAL_WNDPROC.get().is_some() {
+        return Ok(());
+    }
 
     // Replace the window procedure, saving the original
     let original = unsafe {
@@ -554,6 +569,40 @@ fn subclass_desktop_window(
 
     let _ = ORIGINAL_WNDPROC.set(original);
     Ok(())
+}
+
+fn emit_desktop_hook_status(app: &AppHandle, ok: bool, detail: impl Into<String>) {
+    let payload = DesktopHookStatus {
+        ok,
+        detail: detail.into(),
+    };
+    let _ = app.emit_all("desktop-hook-status", payload);
+}
+
+fn request_node_bounds_sync(app: &AppHandle) {
+    let _ = app.emit_all("request-bounds-update", true);
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_desktop_hit_test_hook(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    desktop: &Window,
+) -> Result<(), String> {
+    match subclass_desktop_window(
+        desktop,
+        state.node_bounds.clone(),
+        state.desktop_click_through.clone(),
+    ) {
+        Ok(()) => {
+            emit_desktop_hook_status(app, true, "Desktop hit-test hook active");
+            Ok(())
+        }
+        Err(e) => {
+            emit_desktop_hook_status(app, false, format!("Desktop hit-test hook failed: {e}"));
+            Err(e)
+        }
+    }
 }
 
 // ── Desktop Mode ─────────────────────────────────────────────────────────────
@@ -575,7 +624,13 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
         let _ = desktop.unminimize();
 
         #[cfg(target_os = "windows")]
-        setup_desktop_widget(&desktop)?;
+        {
+            setup_desktop_widget(&desktop)?;
+            if let Err(e) = ensure_desktop_hit_test_hook(app, state, &desktop) {
+                eprintln!("failed to ensure desktop hit-test hook: {e}");
+            }
+            request_node_bounds_sync(app);
+        }
 
         #[cfg(not(target_os = "windows"))]
         {
@@ -602,6 +657,17 @@ fn update_desktop_click_through(app: &AppHandle, state: &State<'_, AppState>, en
         let mut ct = state.desktop_click_through.lock().map_err(|_| "lock poisoned")?;
         *ct = enabled;
     }
+
+    #[cfg(target_os = "windows")]
+    if enabled {
+        if let Some(desktop) = app.get_window("desktop") {
+            if let Err(e) = ensure_desktop_hit_test_hook(app, state, &desktop) {
+                eprintln!("failed to ensure desktop hit-test hook on click-through toggle: {e}");
+            }
+            request_node_bounds_sync(app);
+        }
+    }
+
     // The WM_NCHITTEST handler reads click_through state on every hit-test.
     // No need to toggle anything here — it's instantly effective.
     let _ = app.emit_all("desktop-click-through-changed", enabled);
@@ -638,7 +704,13 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
             let _ = desktop.unminimize();
 
             #[cfg(target_os = "windows")]
-            setup_desktop_widget(&desktop)?;
+            {
+                setup_desktop_widget(&desktop)?;
+                if let Err(e) = ensure_desktop_hit_test_hook(app, state, &desktop) {
+                    eprintln!("failed to ensure desktop hit-test hook after stealth: {e}");
+                }
+                request_node_bounds_sync(app);
+            }
 
             #[cfg(not(target_os = "windows"))]
             {
@@ -970,16 +1042,20 @@ fn main() {
             let window = app.get_window("main").expect("main window");
             let _ = window.set_resizable(false);
             let _ = window.set_decorations(false);
+            let app_handle = app.handle();
 
             let state = app.state::<AppState>();
             let layout = read_layout(&state.layout_path).unwrap_or_default();
             let _ = write_layout(&state.layout_path, &layout);
             *state.cached_layout.lock().expect("cache") = layout;
 
+            // Startup policy: background click-through starts enabled.
+            let _ = update_desktop_click_through(&app_handle, &state, true);
+
             if let Err(e) = register_shortcuts(app.handle()) {
                 eprintln!("failed to register shortcuts: {e}");
             }
-            spawn_layout_watcher(app.handle(), state.layout_path.clone());
+            spawn_layout_watcher(app_handle.clone(), state.layout_path.clone());
 
             // Auto-show desktop overlay as widget
             if let Some(desktop) = app.get_window("desktop") {
@@ -998,14 +1074,10 @@ fn main() {
                         eprintln!("failed to setup desktop widget: {e}");
                     }
 
-                    // Subclass the window to intercept WM_NCHITTEST
-                    if let Err(e) = subclass_desktop_window(
-                        &desktop,
-                        state.node_bounds.clone(),
-                        state.desktop_click_through.clone(),
-                    ) {
-                        eprintln!("failed to subclass desktop window: {e}");
+                    if let Err(e) = ensure_desktop_hit_test_hook(&app_handle, &state, &desktop) {
+                        eprintln!("failed to ensure desktop hit-test hook: {e}");
                     }
+                    request_node_bounds_sync(&app_handle);
                 }
 
                 #[cfg(not(target_os = "windows"))]
