@@ -64,6 +64,8 @@ const GWLP_WNDPROC: i32 = -4;
 #[cfg(target_os = "windows")]
 const WM_NCHITTEST: u32 = 0x0084;
 #[cfg(target_os = "windows")]
+const HTCLIENT: isize = 1;
+#[cfg(target_os = "windows")]
 const HTTRANSPARENT: isize = -1;
 
 // ── Global State for WndProc ─────────────────────────────────────────────────
@@ -489,7 +491,20 @@ unsafe extern "system" fn desktop_wndproc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    let orig = ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
+    let default_result = if orig != 0 {
+        CallWindowProcW(orig, hwnd, msg, wparam, lparam)
+    } else {
+        0
+    };
+
     if msg == WM_NCHITTEST {
+        // Preserve native non-client behavior (title bar, resize borders, etc.)
+        // so decorated windows remain freely movable and resizable.
+        if default_result != HTCLIENT {
+            return default_result;
+        }
+
         // Check if click-through is enabled in settings
         let ct_enabled = WNDPROC_CLICK_THROUGH
             .get()
@@ -525,13 +540,7 @@ unsafe extern "system" fn desktop_wndproc(
         // Over a node or click-through disabled → fall through to WebView2
     }
 
-    // All other messages (and node clicks) → original window procedure
-    let orig = ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
-    if orig != 0 {
-        CallWindowProcW(orig, hwnd, msg, wparam, lparam)
-    } else {
-        0
-    }
+    default_result
 }
 
 /// Replace the desktop window's message procedure with our custom one.
@@ -616,35 +625,25 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
     let desktop = app.get_window("desktop").ok_or("desktop window not found")?;
 
     if visible {
-        let _ = desktop.set_decorations(false);
+        let _ = desktop.set_decorations(true);
         let _ = desktop.set_skip_taskbar(true);
         let _ = desktop.set_always_on_top(false);
-        let _ = desktop.set_resizable(false);
+        let _ = desktop.set_resizable(true);
         desktop.show().map_err(|e| e.to_string())?;
         let _ = desktop.unminimize();
 
         #[cfg(target_os = "windows")]
         {
-            setup_desktop_widget(&desktop)?;
             if let Err(e) = ensure_desktop_hit_test_hook(app, state, &desktop) {
                 eprintln!("failed to ensure desktop hit-test hook: {e}");
             }
             request_node_bounds_sync(app);
         }
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = desktop.set_fullscreen(true);
-        }
-
         // WebView2 must ALWAYS be hit-test visible (never ignore cursor events).
         // The WM_NCHITTEST subclass handles click-through at the window level.
         let _ = desktop.set_ignore_cursor_events(false);
     } else {
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = desktop.set_fullscreen(false);
-        }
         let _ = desktop.hide();
     }
 
@@ -702,19 +701,15 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
         if dv {
             desktop.show().map_err(|e| e.to_string())?;
             let _ = desktop.unminimize();
+            let _ = desktop.set_decorations(true);
+            let _ = desktop.set_resizable(true);
 
             #[cfg(target_os = "windows")]
             {
-                setup_desktop_widget(&desktop)?;
                 if let Err(e) = ensure_desktop_hit_test_hook(app, state, &desktop) {
                     eprintln!("failed to ensure desktop hit-test hook after stealth: {e}");
                 }
                 request_node_bounds_sync(app);
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = desktop.set_fullscreen(true);
             }
 
             let _ = desktop.set_ignore_cursor_events(false);
@@ -1059,10 +1054,10 @@ fn main() {
 
             // Auto-show desktop overlay as widget
             if let Some(desktop) = app.get_window("desktop") {
-                let _ = desktop.set_decorations(false);
+                let _ = desktop.set_decorations(true);
                 let _ = desktop.set_skip_taskbar(true);
                 let _ = desktop.set_always_on_top(false);
-                let _ = desktop.set_resizable(false);
+                let _ = desktop.set_resizable(true);
                 let _ = desktop.show();
 
                 // Keep WebView2 hit-test visible (WM_NCHITTEST handles click-through)
@@ -1070,19 +1065,10 @@ fn main() {
 
                 #[cfg(target_os = "windows")]
                 {
-                    if let Err(e) = setup_desktop_widget(&desktop) {
-                        eprintln!("failed to setup desktop widget: {e}");
-                    }
-
                     if let Err(e) = ensure_desktop_hit_test_hook(&app_handle, &state, &desktop) {
                         eprintln!("failed to ensure desktop hit-test hook: {e}");
                     }
                     request_node_bounds_sync(&app_handle);
-                }
-
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = desktop.set_fullscreen(true);
                 }
             }
 

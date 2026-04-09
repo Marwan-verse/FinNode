@@ -1199,6 +1199,11 @@
     : nodes.slice(0, 8);
   $: isNodeBoardWindow = currentWindowLabel === 'desktop';
 
+  $: if (typeof document !== 'undefined') {
+    document.documentElement.classList.toggle('desktop-overlay-window', isNodeBoardWindow);
+    document.body.classList.toggle('desktop-mode', isNodeBoardWindow);
+  }
+
   $: {
     const validIds = new Set(nodes.map((node) => node.id));
     const next = [...selectedIds].filter((id) => validIds.has(id));
@@ -1231,6 +1236,10 @@
     return () => {
       disposed = true;
       cleanup();
+      if (typeof document !== 'undefined') {
+        document.documentElement.classList.remove('desktop-overlay-window');
+        document.body.classList.remove('desktop-mode');
+      }
     };
   });
 </script>
@@ -1572,6 +1581,11 @@
     color: var(--text);
   }
 
+  :global(html.desktop-overlay-window),
+  :global(body.desktop-mode) {
+    background: transparent;
+  }
+
   .settings-shell {
     width: 100%;
     height: 100%;
@@ -1586,22 +1600,16 @@
     height: 100%;
     display: grid;
     place-items: center;
-    padding: 18px;
-    background:
-      radial-gradient(circle at 18% 18%, rgba(77, 208, 225, 0.1), transparent 30%),
-      radial-gradient(circle at 82% 82%, rgba(123, 208, 137, 0.08), transparent 28%),
-      linear-gradient(165deg, #0b1320 0%, #0d1e31 100%);
+    padding: 0;
+    background: transparent;
   }
 
   .nodeboard-frame {
-    width: 760px;
-    height: 560px;
-    min-width: 460px;
-    min-height: 340px;
-    max-width: calc(100vw - 64px);
-    max-height: calc(100vh - 64px);
-    resize: both;
-    overflow: auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
     border: 1px solid rgba(129, 153, 176, 0.3);
     border-radius: 20px;
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
@@ -1845,10 +1853,8 @@
   .canvas.nodeboard-canvas {
     width: 100%;
     height: 100%;
-    min-height: 380px;
-    background:
-      radial-gradient(circle at 20% 20%, rgba(77, 208, 225, 0.08), transparent 34%),
-      linear-gradient(180deg, rgba(10, 19, 28, 0.82) 0%, rgba(8, 14, 22, 0.97) 100%);
+    min-height: 0;
+    background: transparent;
   }
 
   .links,
@@ -1880,7 +1886,7 @@
     position: absolute;
     width: 104px;
     height: 104px;
-    border-radius: 999px;
+    border-radius: 50%;
     border: 1px solid rgba(143, 163, 181, 0.42);
     background:
       radial-gradient(circle at 26% 24%, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.02) 48%),
@@ -2240,20 +2246,16 @@
     }
 
     .nodeboard-shell {
-      padding: 10px;
+      padding: 0;
     }
 
     .nodeboard-frame {
-      width: calc(100vw - 20px);
-      height: calc(100vh - 20px);
-      min-width: 320px;
-      min-height: 280px;
-      max-width: calc(100vw - 20px);
-      max-height: calc(100vh - 20px);
+      width: 100%;
+      height: 100%;
     }
 
     .canvas.nodeboard-canvas {
-      min-height: 340px;
+      min-height: 0;
     }
 
     .settings-window-controls {

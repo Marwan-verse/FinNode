@@ -46,15 +46,15 @@
       {
         "label": "desktop",
         "title": "FinNode Desktop",
-        "width": 1920,
-        "height": 1080,
-        "transparent": true,
-        "decorations": false,
+        "width": 820,
+        "height": 620,
+        "transparent": false,
+        "decorations": true,
         "alwaysOnTop": false,
         "skipTaskbar": true,
-        "resizable": false,
+        "resizable": true,
         "visible": false,
-        "center": false
+        "center": true
       }
     ]
   }
