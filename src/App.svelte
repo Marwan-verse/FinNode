@@ -11,6 +11,11 @@
   const SAVE_DEBOUNCE_MS = 220;
   const SPRING_STIFFNESS = 0.2;
   const SPRING_DAMPING = 0.82;
+  const BOARD_STATE_KEY = 'finnode.board.v1';
+  const BOARD_DEFAULT_SIZE = { width: 700, height: 700 };
+  const BOARD_MIN_SIZE = { width: 420, height: 420 };
+  const SETTINGS_LAYER_WIDTH = 332;
+  const MAX_NODE_ICON_BYTES = 512 * 1024;
 
   const NODE_COLORS = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
   const NODE_COLOR_MAP = {
@@ -47,6 +52,8 @@
   let selectedIds = new Set();
   let hoveredId = null;
   let highlightNodeId = null;
+  let expandedNodeId = null;
+  let suppressExpandNodeId = null;
 
   let draggingId = null;
   let dragOffset = { x: 0, y: 0 };
@@ -69,6 +76,11 @@
   let launcherQuery = '';
   let launcherIndex = 0;
   let launcherResults = [];
+  let boardShell;
+  let boardResizeObserver = null;
+  let boardResizeEnabled = false;
+  let boardSize = loadBoardSize();
+  let boardShellStyle = '';
 
   function createEditDraft() {
     return {
@@ -91,6 +103,92 @@
     return Math.max(min, Math.min(value, max));
   }
 
+  function boardReservedWidth() {
+    if (typeof window === 'undefined') return SETTINGS_LAYER_WIDTH + 60;
+    return window.innerWidth > 980 ? SETTINGS_LAYER_WIDTH + 60 : 40;
+  }
+
+  function clampBoardSize(width, height) {
+    const rawWidth = Number(width) || BOARD_DEFAULT_SIZE.width;
+    const rawHeight = Number(height) || BOARD_DEFAULT_SIZE.height;
+
+    if (typeof window === 'undefined') {
+      return {
+        width: Math.round(Math.max(BOARD_MIN_SIZE.width, rawWidth)),
+        height: Math.round(Math.max(BOARD_MIN_SIZE.height, rawHeight))
+      };
+    }
+
+    const maxWidth = Math.max(BOARD_MIN_SIZE.width, window.innerWidth - boardReservedWidth());
+    const maxHeight = Math.max(BOARD_MIN_SIZE.height, window.innerHeight - 72);
+
+    return {
+      width: Math.round(clamp(rawWidth, BOARD_MIN_SIZE.width, maxWidth)),
+      height: Math.round(clamp(rawHeight, BOARD_MIN_SIZE.height, maxHeight))
+    };
+  }
+
+  function loadBoardSize() {
+    if (typeof window === 'undefined') {
+      return { ...BOARD_DEFAULT_SIZE };
+    }
+
+    try {
+      const raw = localStorage.getItem(BOARD_STATE_KEY);
+      if (!raw) return { ...BOARD_DEFAULT_SIZE };
+      const parsed = JSON.parse(raw);
+      return clampBoardSize(parsed?.width, parsed?.height);
+    } catch {
+      return { ...BOARD_DEFAULT_SIZE };
+    }
+  }
+
+  function persistBoardSize() {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(BOARD_STATE_KEY, JSON.stringify(boardSize));
+  }
+
+  function applyBoardSize(width, height, persist = true, reclampNodes = true) {
+    const next = clampBoardSize(width, height);
+    if (next.width === boardSize.width && next.height === boardSize.height) return;
+
+    boardSize = next;
+    if (persist) persistBoardSize();
+
+    if (reclampNodes) {
+      void tick().then(() => {
+        clampAllNodesToCanvas(false);
+        queueRender();
+      });
+    }
+  }
+
+  function setupBoardResizeObserver() {
+    if (typeof ResizeObserver === 'undefined' || !boardShell) return;
+    if (boardResizeObserver) {
+      boardResizeObserver.disconnect();
+    }
+
+    boardResizeObserver = new ResizeObserver((entries) => {
+      if (!boardResizeEnabled) return;
+      const rect = entries[0]?.contentRect;
+      if (!rect) return;
+      applyBoardSize(rect.width, rect.height, true, false);
+    });
+
+    boardResizeObserver.observe(boardShell);
+  }
+
+  function toggleBoardResizeMode() {
+    boardResizeEnabled = !boardResizeEnabled;
+    updateStatus(boardResizeEnabled ? 'Board resize unlocked' : 'Board resize locked');
+  }
+
+  function resetBoardSize() {
+    applyBoardSize(BOARD_DEFAULT_SIZE.width, BOARD_DEFAULT_SIZE.height, true, true);
+    updateStatus('Board size reset to 700x700');
+  }
+
   function normalizeOptionalString(value) {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
@@ -104,6 +202,10 @@
 
   function isLogoIcon(icon) {
     return icon === LOGO_ICON || icon === 'fin';
+  }
+
+  function isImageIcon(icon) {
+    return typeof icon === 'string' && icon.startsWith('data:image/');
   }
 
   function nodeColor(node) {
@@ -399,6 +501,22 @@
     }
   }
 
+  async function minimizeToTray() {
+    try {
+      await invoke('hide_main_window');
+    } catch (error) {
+      updateStatus(`Unable to minimize: ${String(error)}`);
+    }
+  }
+
+  async function shutdownApp() {
+    try {
+      await invoke('exit_app');
+    } catch (error) {
+      updateStatus(`Unable to shutdown: ${String(error)}`);
+    }
+  }
+
   function addNode() {
     const offset = nodes.length * 14;
     const next = createEmptyNode(50 + offset, 70 + offset);
@@ -600,6 +718,8 @@
   function onPointerUp() {
     if (!draggingId) return;
 
+    const releasedId = draggingId;
+
     if (dragFrame !== null) {
       cancelAnimationFrame(dragFrame);
       dragFrame = null;
@@ -614,7 +734,27 @@
     if (moved) {
       syncSmooth(true);
       scheduleSave();
+      suppressExpandNodeId = releasedId;
+      setTimeout(() => {
+        if (suppressExpandNodeId === releasedId) suppressExpandNodeId = null;
+      }, 0);
     }
+  }
+
+  function onNodeClick(event, nodeId) {
+    if (event.button !== 0) return;
+    if (suppressExpandNodeId === nodeId) {
+      suppressExpandNodeId = null;
+      return;
+    }
+
+    expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
+  }
+
+  function onNodeKeydown(event, nodeId) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
   }
 
   function nodeRef(element, id) {
@@ -784,6 +924,43 @@
     editPopup = { open: true, nodeId };
   }
 
+  function clearUploadedNodeIcon() {
+    editDraft = {
+      ...editDraft,
+      icon: ''
+    };
+  }
+
+  function handleNodeIconUpload(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      updateStatus('Please choose an image file');
+      input.value = '';
+      return;
+    }
+
+    if (file.size > MAX_NODE_ICON_BYTES) {
+      updateStatus('Icon image must be 512KB or smaller');
+      input.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') return;
+      editDraft = {
+        ...editDraft,
+        icon: reader.result
+      };
+      updateStatus('Node image uploaded');
+    };
+    reader.readAsDataURL(file);
+    input.value = '';
+  }
+
   function toggleEditLink(targetId, enabled) {
     if (enabled) {
       editSelectedLinks = [...new Set([...editSelectedLinks, targetId])];
@@ -796,6 +973,7 @@
     if (!editPopup.nodeId || isLockedNode(editPopup.nodeId)) return;
 
     const nodeId = editPopup.nodeId;
+    const normalizedIcon = isImageIcon(editDraft.icon) ? editDraft.icon : editDraft.icon.trim();
     nodes = nodes.map((node) => {
       if (node.id !== nodeId) return node;
 
@@ -803,7 +981,7 @@
       return {
         ...node,
         name: nextName || node.name,
-        icon: editDraft.icon.trim(),
+        icon: normalizedIcon,
         description: editDraft.description.trim(),
         color: NODE_COLORS.includes(editDraft.color) ? editDraft.color : 'slate',
         links: [...new Set(editSelectedLinks.filter((id) => id !== nodeId))],
@@ -1011,8 +1189,11 @@
     });
 
     await loadWorkspaces();
+    await tick();
+    setupBoardResizeObserver();
 
     const onResize = () => {
+      applyBoardSize(boardSize.width, boardSize.height, true, false);
       queueRender();
       void tick().then(() => clampAllNodesToCanvas(false));
     };
@@ -1028,6 +1209,7 @@
       }
       if (!event.target.closest('.node') && !event.ctrlKey && !event.metaKey) {
         selectedIds = new Set();
+        expandedNodeId = null;
       }
     };
 
@@ -1065,6 +1247,7 @@
       if (saveTimer !== null) clearTimeout(saveTimer);
       if (dragFrame !== null) cancelAnimationFrame(dragFrame);
       if (springFrame !== null) cancelAnimationFrame(springFrame);
+      if (boardResizeObserver) boardResizeObserver.disconnect();
     };
   }
 
@@ -1087,6 +1270,8 @@
     ? nodes.filter((node) => node.name.toLowerCase().includes(launcherQuery.toLowerCase())).slice(0, 8)
     : nodes.slice(0, 8);
 
+  $: boardShellStyle = `width:${boardSize.width}px;height:${boardSize.height}px;`;
+
   $: {
     const validIds = new Set(nodes.map((node) => node.id));
     const next = [...selectedIds].filter((id) => validIds.has(id));
@@ -1095,6 +1280,7 @@
     }
     if (hoveredId && !validIds.has(hoveredId)) hoveredId = null;
     if (highlightNodeId && !validIds.has(highlightNodeId)) highlightNodeId = null;
+    if (expandedNodeId && !validIds.has(expandedNodeId)) expandedNodeId = null;
   }
 
   onMount(() => {
@@ -1124,12 +1310,84 @@
   <pre class="fatal">{fatalError}</pre>
 {:else}
   <main class="app-shell">
-    <aside class="sidebar">
+    <section class="canvas-panel board-layer" aria-label="Node board background layer">
+      <div class="board-shell" class:board-shell--resizable={boardResizeEnabled} style={boardShellStyle} bind:this={boardShell}>
+        <header class="canvas-header">
+          <div>
+            <h2>Node Board</h2>
+            <p>Persistent workspace layer. Ctrl/Cmd+Click to multi-select. Right-click for node actions.</p>
+          </div>
+          <div class="canvas-header__actions">
+            <span class="canvas-header__size">{boardSize.width} x {boardSize.height}</span>
+            <button class:active={boardResizeEnabled} on:click={toggleBoardResizeMode}>
+              {boardResizeEnabled ? 'Lock Resize' : 'Resize Board'}
+            </button>
+            <button on:click={resetBoardSize}>Reset</button>
+          </div>
+        </header>
+
+        <div class="canvas" bind:this={nodeLayer}>
+          <svg class="links" {viewBox}>
+            {#each links as link}
+              <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
+            {/each}
+          </svg>
+
+          <div class="node-layer">
+            {#each renderNodes as node (node.id)}
+              <div
+                class="node"
+                class:node--selected={selectedIds.has(node.id)}
+                class:node--dragging={draggingId === node.id}
+                class:node--expanded={expandedNodeId === node.id}
+                role="button"
+                tabindex="0"
+                use:nodeRef={node.id}
+                style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
+                on:pointerdown={(event) => beginDrag(event, node.id)}
+                on:click={(event) => onNodeClick(event, node.id)}
+                on:keydown={(event) => onNodeKeydown(event, node.id)}
+                on:contextmenu={(event) => openCtxMenu(event, node.id)}
+                on:dblclick={() => void launchNode(node, 'open-path')}
+                on:mouseenter={() => onNodeEnter(node.id)}
+                on:mouseleave={() => onNodeLeave(node.id)}
+              >
+                <div class="node__top">
+                  <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
+                  <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
+                </div>
+
+                {#if isImageIcon(node.icon)}
+                  <img class="node__icon-image" src={node.icon} alt={node.name || 'Node icon'} />
+                {:else if isLogoIcon(node.icon)}
+                  <img class="node__logo" src={appLogo} alt="FinNode" />
+                {:else}
+                  <div class="node__icon">{node.icon || 'N'}</div>
+                {/if}
+
+                <div class="node__name">{node.name || 'Untitled'}</div>
+                {#if expandedNodeId === node.id}
+                  <div class="node__hint">{node.description || 'Node expanded'}</div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="sidebar settings-layer">
       <header class="brand panel">
-        <img class="brand__logo" src={appLogo} alt="FinNode" />
-        <div>
-          <h1>FinNode</h1>
-          <p>Static node panel</p>
+        <div class="brand__identity">
+          <img class="brand__logo" src={appLogo} alt="FinNode" />
+          <div>
+            <h1>FinNode</h1>
+            <p>Settings and controls</p>
+          </div>
+        </div>
+        <div class="settings-window-controls">
+          <button on:click={minimizeToTray}>Minimize</button>
+          <button class="danger" on:click={shutdownApp}>Shutdown</button>
         </div>
       </header>
 
@@ -1206,53 +1464,6 @@
         </div>
       </section>
     </aside>
-
-    <section class="canvas-panel panel">
-      <header class="canvas-header">
-        <div>
-          <h2>Node Board</h2>
-          <p>Ctrl/Cmd+Click to multi-select. Right-click a node for actions. Alt+Space opens launcher.</p>
-        </div>
-      </header>
-
-      <div class="canvas" bind:this={nodeLayer}>
-        <svg class="links" {viewBox}>
-          {#each links as link}
-            <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
-          {/each}
-        </svg>
-
-        <div class="node-layer">
-          {#each renderNodes as node (node.id)}
-            <article
-              class="node"
-              class:node--selected={selectedIds.has(node.id)}
-              class:node--dragging={draggingId === node.id}
-              use:nodeRef={node.id}
-              style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
-              on:pointerdown={(event) => beginDrag(event, node.id)}
-              on:contextmenu={(event) => openCtxMenu(event, node.id)}
-              on:dblclick={() => void launchNode(node, 'open-path')}
-              on:mouseenter={() => onNodeEnter(node.id)}
-              on:mouseleave={() => onNodeLeave(node.id)}
-            >
-              <div class="node__top">
-                <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
-                <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
-              </div>
-
-              {#if isLogoIcon(node.icon)}
-                <img class="node__logo" src={appLogo} alt="FinNode" />
-              {:else}
-                <div class="node__icon">{node.icon || 'N'}</div>
-              {/if}
-
-              <div class="node__name">{node.name || 'Untitled'}</div>
-            </article>
-          {/each}
-        </div>
-      </div>
-    </section>
   </main>
 
   {#if editPopup.open && editNode}
@@ -1273,6 +1484,18 @@
           <span>Icon</span>
           <input bind:value={editDraft.icon} placeholder="N" />
         </label>
+
+        <label>
+          <span>Upload icon image</span>
+          <input type="file" accept="image/*" on:change={handleNodeIconUpload} />
+        </label>
+
+        {#if isImageIcon(editDraft.icon)}
+          <div class="icon-upload-preview">
+            <img class="icon-upload-preview__img" src={editDraft.icon} alt="Icon preview" />
+            <button type="button" class="ghost" on:click={clearUploadedNodeIcon}>Remove uploaded image</button>
+          </div>
+        {/if}
 
         <label>
           <span>Description</span>
@@ -1394,6 +1617,7 @@
     --accent: #4dd0e1;
     --border: rgba(138, 165, 189, 0.24);
     --danger: #f27f8f;
+    --settings-width: 332px;
   }
 
   * {
@@ -1418,18 +1642,25 @@
     width: 100%;
     height: 100%;
     padding: 14px;
-    display: grid;
-    grid-template-columns: 332px 1fr;
-    gap: 14px;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
   }
 
   .sidebar {
+    width: var(--settings-width);
     min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 12px;
     overflow: auto;
     padding-right: 2px;
+    position: relative;
+    z-index: 20;
+  }
+
+  .settings-layer {
+    pointer-events: auto;
   }
 
   .panel {
@@ -1440,6 +1671,13 @@
   }
 
   .brand {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .brand__identity {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -1464,6 +1702,20 @@
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.03);
     padding: 4px;
+  }
+
+  .settings-window-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .settings-window-controls button {
+    width: auto;
+    white-space: nowrap;
+    padding: 7px 10px;
+    font-size: 0.74rem;
   }
 
   .panel__head {
@@ -1611,10 +1863,81 @@
 
   .canvas-panel {
     min-height: 0;
+  }
+
+  .board-layer {
+    position: absolute;
+    inset: 14px;
+    z-index: 0;
+    padding-left: calc(var(--settings-width) + 18px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .board-shell {
+    width: 700px;
+    height: 700px;
+    min-width: 420px;
+    min-height: 420px;
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 16px;
+    border: 1px solid rgba(129, 153, 176, 0.24);
+    background: linear-gradient(180deg, rgba(12, 22, 33, 0.94) 0%, rgba(9, 16, 24, 0.97) 100%);
+    box-shadow: 0 20px 34px rgba(0, 0, 0, 0.35);
     display: flex;
     flex-direction: column;
     gap: 10px;
     padding: 12px;
+    pointer-events: auto;
+    overflow: hidden;
+  }
+
+  .board-shell--resizable {
+    resize: both;
+    overflow: hidden;
+    outline: 2px dashed rgba(77, 208, 225, 0.42);
+    outline-offset: -6px;
+  }
+
+  .canvas-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .canvas-header__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .canvas-header__actions button {
+    width: auto;
+    padding: 7px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: rgba(9, 17, 25, 0.72);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+
+  .canvas-header__actions button.active {
+    border-color: rgba(77, 208, 225, 0.68);
+    color: #bbf7ff;
+  }
+
+  .canvas-header__size {
+    font-size: 0.75rem;
+    color: var(--muted);
+    white-space: nowrap;
+    padding-right: 2px;
   }
 
   .canvas-header h2 {
@@ -1630,12 +1953,14 @@
 
   .canvas {
     position: relative;
-    flex: 1;
-    min-height: 320px;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
     border-radius: 12px;
     border: 1px solid rgba(129, 153, 176, 0.2);
     background: linear-gradient(180deg, rgba(10, 19, 28, 0.75) 0%, rgba(9, 16, 24, 0.95) 100%);
     overflow: hidden;
+    z-index: 0;
   }
 
   .links,
@@ -1667,19 +1992,21 @@
     position: absolute;
     width: 96px;
     height: 96px;
-    border-radius: 18px;
+    border-radius: 999px;
     border: 1px solid rgba(143, 163, 181, 0.32);
     background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.08), rgba(8, 14, 22, 0.85));
     color: var(--text);
-    padding: 8px;
+    padding: 10px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 5px;
     pointer-events: auto;
     user-select: none;
     cursor: grab;
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
-    transition: border-color 120ms ease, transform 120ms ease;
+    transform-origin: center;
+    transition: border-color 120ms ease, transform 150ms ease, box-shadow 150ms ease;
   }
 
   .node--selected {
@@ -1689,6 +2016,16 @@
   .node--dragging {
     cursor: grabbing;
     transform: scale(1.02);
+  }
+
+  .node--expanded {
+    transform: scale(1.28);
+    z-index: 8;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(77, 208, 225, 0.35);
+  }
+
+  .node--expanded.node--dragging {
+    transform: scale(1.2);
   }
 
   .node__top {
@@ -1718,9 +2055,9 @@
 
   .node__icon,
   .node__logo {
-    width: 26px;
-    height: 26px;
-    border-radius: 8px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
     display: grid;
     place-items: center;
     margin: 0 auto;
@@ -1732,16 +2069,38 @@
 
   .node__logo {
     object-fit: contain;
-    padding: 4px;
+    padding: 5px;
+  }
+
+  .node__icon-image {
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    object-fit: cover;
+    border: 1px solid rgba(143, 163, 181, 0.3);
+    background: rgba(7, 14, 22, 0.72);
   }
 
   .node__name {
     margin-top: auto;
     font-size: 0.72rem;
     text-align: center;
+    max-width: 82px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .node__hint {
+    width: 88px;
+    margin-top: 2px;
+    font-size: 0.57rem;
+    line-height: 1.2;
+    color: var(--muted);
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .modal,
@@ -1786,6 +2145,32 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .editor-modal input[type='file'] {
+    padding: 6px;
+  }
+
+  .icon-upload-preview {
+    border: 1px dashed rgba(133, 157, 180, 0.35);
+    border-radius: 10px;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(9, 15, 23, 0.52);
+  }
+
+  .icon-upload-preview__img {
+    width: 46px;
+    height: 46px;
+    border-radius: 10px;
+    object-fit: cover;
+    border: 1px solid rgba(133, 157, 180, 0.28);
+  }
+
+  .icon-upload-preview button {
+    width: auto;
   }
 
   .editor-modal label span,
@@ -1919,17 +2304,43 @@
 
   @media (max-width: 980px) {
     .app-shell {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto 1fr;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: auto;
     }
 
-    .sidebar {
-      max-height: 48vh;
+    .settings-layer.sidebar {
+      width: 100%;
+      max-height: 46vh;
       padding-right: 0;
     }
 
-    .canvas {
+    .board-layer {
+      position: relative;
+      inset: auto;
+      padding-left: 0;
+      pointer-events: auto;
       min-height: 420px;
+      align-items: stretch;
+      justify-content: stretch;
+    }
+
+    .board-shell {
+      width: 100% !important;
+      min-width: 0;
+      min-height: 420px;
+      height: 520px !important;
+    }
+
+    .canvas-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .canvas-header__actions {
+      flex-wrap: wrap;
     }
 
     .row--tight {
