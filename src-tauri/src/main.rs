@@ -402,9 +402,50 @@ fn show_settings_view(app: AppHandle, _state: State<'_, AppState>) -> Result<(),
 fn pin_desktop_bottom(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     if let Some(desktop) = app.get_window("desktop") {
-        set_window_bottom(&desktop)?;
+        set_window_bottom_native(&desktop)?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn set_window_bottom(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(win) = app.get_window("desktop") {
+        // macOS — push window to desktop level (below all normal windows)
+        #[cfg(target_os = "macos")]
+        {
+            use objc::{msg_send, sel, sel_impl};
+            let ns_win: *mut objc::runtime::Object = win.ns_window().unwrap() as _;
+            unsafe {
+                // NSWindowLevel::desktopIconWindowLevel = -2147483623
+                let _: () = msg_send![ns_win, setLevel: -2147483623i64];
+                let _: () = msg_send![ns_win, setCollectionBehavior: (1 << 0) | (1 << 4)];
+                //                           NSWindowCollectionBehaviorCanJoinAllSpaces |
+                //                           NSWindowCollectionBehaviorStationary
+            }
+        }
+        // Windows — push window behind all others with HWND_BOTTOM
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            };
+
+            let hwnd = win.hwnd().unwrap();
+            unsafe {
+                let _ = SetWindowPos(
+                    HWND(hwnd.0),
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -463,7 +504,7 @@ fn setup_desktop_widget(window: &Window) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn set_window_bottom(window: &Window) -> Result<(), String> {
+fn set_window_bottom_native(window: &Window) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     unsafe {
@@ -1082,7 +1123,7 @@ fn main() {
             update_node_bounds,
             get_platform,
             hide_main_window, show_main_window, show_settings_view, exit_app,
-            pin_desktop_bottom,
+            pin_desktop_bottom, set_window_bottom,
             list_workspaces, create_workspace, switch_workspace, delete_workspace, rename_workspace,
             get_command_history, clear_command_history
         ])

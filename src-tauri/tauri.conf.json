@@ -1,60 +1,84 @@
 {
   "build": {
     "beforeBuildCommand": "npm run build:web",
-    "beforeDevCommand": "npm run build:web",
-    "devPath": "../dist",
-    "distDir": "../dist"
+    "beforeDevCommand":   "npm run build:web",
+    "devPath":   "../dist",
+    "distDir":   "../dist"
   },
   "package": {
     "productName": "FinNode",
-    "version": "0.2.0"
+    "version":     "0.2.0"
   },
   "tauri": {
     "systemTray": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false
+      "iconPath":     "icons/icon.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false
     },
     "allowlist": {
       "all": false,
+      "window": {
+        "all": true
+      },
       "shell": {
-        "all": false,
-        "open": true
-      }
+        "all":  false,
+        "open": true,
+        "execute": true,
+        "sidecar": false
+      },
+      "path":     { "all": true },
+      "fs":       { "all": true, "scope": ["$APPDATA/*", "$HOME/*"] },
+      "protocol": { "asset": true, "assetScope": ["**"] }
     },
     "bundle": {
-      "active": true,
+      "active":     true,
       "identifier": "com.marwanverse.finnode",
-      "icon": ["icons/icon.ico", "icons/icon.png"]
+      "icon": [
+        "icons/icon.ico",
+        "icons/icon.png"
+      ],
+      "resources": [],
+      "externalBin": [],
+      "copyright": "",
+      "category": "DeveloperTool",
+      "shortDescription": "Project node navigator",
+      "longDescription": ""
     },
     "security": {
       "csp": null
     },
     "windows": [
       {
-        "label": "main",
-        "title": "FinNode",
-        "width": 560,
-        "height": 820,
-        "transparent": false,
-        "decorations": false,
-        "alwaysOnTop": false,
-        "skipTaskbar": false,
-        "resizable": false,
-        "visible": true,
-        "center": true
+        "label":        "main",
+        "title":        "FinNode",
+        "width":        360,
+        "height":       820,
+        "minWidth":     320,
+        "minHeight":    500,
+        "transparent":  false,
+        "decorations":  false,
+        "alwaysOnTop":  false,
+        "skipTaskbar":  false,
+        "resizable":    true,
+        "visible":      true,
+        "center":       true,
+        "theme":        "Dark"
       },
       {
-        "label": "desktop",
-        "title": "FinNode Desktop",
-        "width": 820,
-        "height": 620,
-        "transparent": false,
-        "decorations": false,
-        "alwaysOnTop": false,
-        "skipTaskbar": true,
-        "resizable": true,
-        "visible": false,
-        "center": true
+        "label":        "desktop",
+        "title":        "FinNode Desktop",
+        "width":        860,
+        "height":       640,
+        "minWidth":     480,
+        "minHeight":    320,
+        "transparent":  true,
+        "decorations":  false,
+        "alwaysOnTop":  false,
+        "skipTaskbar":  true,
+        "resizable":    true,
+        "visible":      false,
+        "center":       true,
+        "theme":        "Dark"
       }
     ]
   }
