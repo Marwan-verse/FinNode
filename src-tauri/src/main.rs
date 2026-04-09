@@ -625,7 +625,7 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
     let desktop = app.get_window("desktop").ok_or("desktop window not found")?;
 
     if visible {
-        let _ = desktop.set_decorations(true);
+        let _ = desktop.set_decorations(false);
         let _ = desktop.set_skip_taskbar(true);
         let _ = desktop.set_always_on_top(false);
         let _ = desktop.set_resizable(true);
@@ -701,7 +701,7 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
         if dv {
             desktop.show().map_err(|e| e.to_string())?;
             let _ = desktop.unminimize();
-            let _ = desktop.set_decorations(true);
+            let _ = desktop.set_decorations(false);
             let _ = desktop.set_resizable(true);
 
             #[cfg(target_os = "windows")]
@@ -1054,7 +1054,7 @@ fn main() {
 
             // Auto-show desktop overlay as widget
             if let Some(desktop) = app.get_window("desktop") {
-                let _ = desktop.set_decorations(true);
+                let _ = desktop.set_decorations(false);
                 let _ = desktop.set_skip_taskbar(true);
                 let _ = desktop.set_always_on_top(false);
                 let _ = desktop.set_resizable(true);

@@ -411,19 +411,12 @@
     }
   }
 
-  async function minimizeToTray() {
+  async function openSettingsFromMainNode() {
     try {
-      await invoke('hide_main_window');
+      await invoke('show_settings_view');
+      updateStatus('Opened settings');
     } catch (error) {
-      updateStatus(`Unable to minimize: ${String(error)}`);
-    }
-  }
-
-  async function shutdownApp() {
-    try {
-      await invoke('exit_app');
-    } catch (error) {
-      updateStatus(`Unable to shutdown: ${String(error)}`);
+      updateStatus(`Unable to open settings: ${String(error)}`);
     }
   }
 
@@ -658,12 +651,25 @@
       return;
     }
 
+    if (nodeId === MAIN_NODE_ID) {
+      expandedNodeId = null;
+      void openSettingsFromMainNode();
+      return;
+    }
+
     expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
   }
 
   function onNodeKeydown(event, nodeId) {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
+
+    if (nodeId === MAIN_NODE_ID) {
+      expandedNodeId = null;
+      void openSettingsFromMainNode();
+      return;
+    }
+
     expandedNodeId = expandedNodeId === nodeId ? null : nodeId;
   }
 
@@ -1264,6 +1270,7 @@
                 class:node--selected={selectedIds.has(node.id)}
                 class:node--dragging={draggingId === node.id}
                 class:node--expanded={expandedNodeId === node.id}
+                class:node--main={node.id === MAIN_NODE_ID}
                 role="button"
                 tabindex="0"
                 use:nodeRef={node.id}
@@ -1294,8 +1301,10 @@
                 {/if}
 
                 <div class="node__top">
-                  <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
-                  <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
+                  <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)} class:node__dot--core={node.id === MAIN_NODE_ID}></span>
+                  {#if !isLockedNode(node)}
+                    <button class="node__edit" on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
+                  {/if}
                 </div>
 
                 {#if isImageIcon(node.icon)}
@@ -1326,10 +1335,6 @@
             <h1>FinNode</h1>
             <p>Settings and controls</p>
           </div>
-        </div>
-        <div class="settings-window-controls">
-          <button on:click={minimizeToTray}>Minimize</button>
-          <button class="danger" on:click={shutdownApp}>Shutdown</button>
         </div>
       </header>
 
@@ -1381,7 +1386,9 @@
               <div class="node-row__title" title={node.name || 'Untitled node'}>{node.name || 'Untitled node'}</div>
               <div class="node-row__actions">
                 <button disabled={!hasLaunchTarget(node, 'open-path')} on:click={() => void launchNode(node, 'open-path')}>Open</button>
-                <button disabled={locked} on:click={() => openEditor(node.id)}>Edit</button>
+                {#if !locked}
+                  <button on:click={() => openEditor(node.id)}>Edit</button>
+                {/if}
                 <button disabled={locked} on:click={() => cloneNode(node.id)}>Clone</button>
                 <button class="danger" disabled={locked} on:click={() => deleteNode(node.id)}>Delete</button>
               </div>
@@ -1505,7 +1512,9 @@
       <button disabled={!hasLaunchTarget(contextNode, 'open-editor')} on:click={() => launchFromContext('open-editor')}>Open editor</button>
       <button disabled={!hasLaunchTarget(contextNode, 'open-browser')} on:click={() => launchFromContext('open-browser')}>Open browser</button>
       <button disabled={!hasLaunchTarget(contextNode, 'run-script')} on:click={() => launchFromContext('run-script')}>Run script</button>
-      <button disabled={isLockedNode(contextNode)} on:click={openEditorFromMenu}>Edit</button>
+      {#if !isLockedNode(contextNode)}
+        <button on:click={openEditorFromMenu}>Edit</button>
+      {/if}
       <button on:click={addConnected}>Add connected node</button>
       <button on:click={connectNearest}>Connect nearest</button>
       <button on:click={clearLinks}>Clear links</button>
@@ -1679,20 +1688,6 @@
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.03);
     padding: 4px;
-  }
-
-  .settings-window-controls {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: auto;
-  }
-
-  .settings-window-controls button {
-    width: auto;
-    white-space: nowrap;
-    padding: 7px 10px;
-    font-size: 0.74rem;
   }
 
   .panel__head {
@@ -1886,6 +1881,7 @@
     position: absolute;
     width: 104px;
     height: 104px;
+    aspect-ratio: 1 / 1;
     border-radius: 50%;
     border: 1px solid rgba(143, 163, 181, 0.42);
     background:
@@ -1907,6 +1903,19 @@
 
   .node--selected {
     border-color: rgba(77, 208, 225, 0.78);
+  }
+
+  .node--main {
+    border-color: rgba(246, 194, 91, 0.86);
+    background:
+      radial-gradient(circle at 24% 22%, rgba(255, 232, 162, 0.34), rgba(255, 255, 255, 0.03) 48%),
+      linear-gradient(180deg, rgba(34, 24, 10, 0.95), rgba(18, 13, 6, 0.93));
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(246, 194, 91, 0.42);
+  }
+
+  .node--main .node__name {
+    color: #ffe7ad;
+    font-weight: 700;
   }
 
   .node--dragging {
@@ -1976,6 +1985,11 @@
 
   .node__dot--active {
     background: #79d089;
+  }
+
+  .node__dot--core {
+    background: #f6c25b;
+    box-shadow: 0 0 8px rgba(246, 194, 91, 0.7);
   }
 
   .node__edit {
@@ -2256,10 +2270,6 @@
 
     .canvas.nodeboard-canvas {
       min-height: 0;
-    }
-
-    .settings-window-controls {
-      flex-wrap: wrap;
     }
 
     .row--tight {
