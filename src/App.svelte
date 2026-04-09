@@ -13,8 +13,11 @@
   const SPRING_STIFFNESS  = 0.22;
   const SPRING_DAMPING    = 0.80;
   const MAX_NODE_ICON_BYTES = 512 * 1024;
+  const MAX_SCRIPT_UPLOAD_BYTES = 1024 * 1024;
 
   const NODE_COLORS    = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
+  const NODE_TYPES     = ['default', 'script'];
+  const MACRO_ACTIONS  = ['run-script', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
   const NODE_COLOR_MAP = {
     slate:  '#8fa3b5',
     cyan:   '#5ee7f7',
@@ -75,6 +78,8 @@
   let editNode   = null;
   let editDraft  = createEditDraft();
   let editSelectedLinks = [];
+  let editMacroSteps = [];
+  let editScriptUpload = null;
 
   let showLauncher    = false;
   let launcherQuery   = '';
@@ -100,7 +105,12 @@
   async function closeWindow()    { try { await appWindow.close();    } catch(e) {} }
 
   function createEditDraft() {
-    return { name:'', icon:'', description:'', path:'', editor:'', browser:'', script:'', color:'slate' };
+    return {
+      name:'', icon:'', description:'',
+      path:'', editor:'', browser:'', script:'',
+      color:'slate', node_type:'default',
+      uploaded_script_path:'', uploaded_script_name:''
+    };
   }
 
   function uid(prefix) { return `${prefix}-${Math.random().toString(36).slice(2,8)}`; }
@@ -108,6 +118,47 @@
   function normalizeOptionalString(v) {
     if (typeof v !== 'string') return null;
     const t = v.trim(); return t || null;
+  }
+  function normalizeNodeType(v) {
+    return NODE_TYPES.includes(v) ? v : 'default';
+  }
+  function createMacroStep(action='run-script', value='') {
+    return {action, value};
+  }
+  function normalizeMacroStep(raw) {
+    const action = MACRO_ACTIONS.includes(raw?.action) ? raw.action : 'run-script';
+    const value = typeof raw?.value === 'string' ? raw.value : '';
+    return {action, value};
+  }
+  function normalizeMacroSteps(steps) {
+    return (Array.isArray(steps) ? steps : [])
+      .map(normalizeMacroStep)
+      .filter(step => step.action === 'delay' ? true : step.value.trim().length > 0);
+  }
+  function macroActionLabel(action) {
+    if (action === 'run-script') return 'Run script';
+    if (action === 'open-path') return 'Open path';
+    if (action === 'open-editor') return 'Open editor';
+    if (action === 'open-browser') return 'Open browser';
+    if (action === 'delay') return 'Delay (ms)';
+    if (action === 'open-application') return 'Open application';
+    return action;
+  }
+  function macroValuePlaceholder(action) {
+    if (action === 'run-script') return 'npm run dev';
+    if (action === 'open-path') return '/path/to/project';
+    if (action === 'open-editor') return 'code /path/to/project';
+    if (action === 'open-browser') return 'https://example.com';
+    if (action === 'delay') return '1000';
+    if (action === 'open-application') return 'obsidian';
+    return 'Value';
+  }
+  function isScriptNode(node) {
+    return normalizeNodeType(node?.node_type) === 'script';
+  }
+  function nodeScriptTarget(node) {
+    return normalizeOptionalString(node?.uploaded_script_path)
+      || normalizeOptionalString(node?.targets?.script);
   }
   function isLockedNode(n) {
     const id = typeof n === 'string' ? n : n?.id;
@@ -122,11 +173,15 @@
     let x = 30, y = 30;
     if (anchor) { x = Math.max(20, Number(anchor.x)-130); y = Math.max(20, Number(anchor.y)-30); }
     return { id:MAIN_NODE_ID, name:MAIN_NODE_NAME, icon:LOGO_ICON, description:'Core entry node', x, y,
-             links:[], targets:{path:null,editor:null,browser:null,script:null}, color:'cyan', locked:true, last_launched:null };
+             links:[], targets:{path:null,editor:null,browser:null,script:null},
+             node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
+             color:'cyan', macros:[], locked:true, last_launched:null };
   }
   function createEmptyNode(x, y) {
     return { id:uid('node'), name:'', icon:'', description:'', x, y,
-             links:[], targets:{path:null,editor:null,browser:null,script:null}, color:'slate', locked:false, last_launched:null };
+             links:[], targets:{path:null,editor:null,browser:null,script:null},
+             node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
+             color:'slate', macros:[], locked:false, last_launched:null };
   }
   function normalizeNode(raw, index=0) {
     const t = raw?.targets ?? {};
@@ -140,7 +195,11 @@
       links:       Array.isArray(raw?.links) ? raw.links.filter(id=>typeof id==='string') : [],
       targets:     { path:normalizeOptionalString(t.path), editor:normalizeOptionalString(t.editor),
                      browser:normalizeOptionalString(t.browser), script:normalizeOptionalString(t.script) },
+      node_type:   normalizeNodeType(raw?.node_type),
+      uploaded_script_path: normalizeOptionalString(raw?.uploaded_script_path),
+      uploaded_script_name: normalizeOptionalString(raw?.uploaded_script_name),
       color:       NODE_COLORS.includes(raw?.color) ? raw.color : 'slate',
+      macros:      normalizeMacroSteps(raw?.macros),
       locked:      Boolean(raw?.locked),
       last_launched: typeof raw?.last_launched==='string' ? raw.last_launched : null
     };
@@ -255,7 +314,16 @@
   /* ─── Node actions ───────────────────────────────────────────────── */
   async function launchNode(node, action) {
     try {
-      await invoke('launch_node', {node, action});
+      if (action === 'run-macro') {
+        const steps = normalizeMacroSteps(node?.macros);
+        if (!steps.length) {
+          updateStatus('No macro steps configured');
+          return;
+        }
+        await invoke('run_node_macro', {steps});
+      } else {
+        await invoke('launch_node', {node, action});
+      }
       nodes = nodes.map(n => n.id!==node.id ? n : {...n, last_launched:new Date().toISOString()});
       queueRender();
       updateStatus(`${action} → ${node.name||'node'}`);
@@ -279,7 +347,8 @@
     if (isLockedNode(nodeId)) return;
     const src = nodes.find(n=>n.id===nodeId); if (!src) return;
     const clone = {...src, id:uid('node'), name:src.name?`${src.name} copy`:'Node copy', x:src.x+28, y:src.y+28,
-                   links:[...(src.links??[])], targets:{...(src.targets??{})}, locked:false};
+                   links:[...(src.links??[])], targets:{...(src.targets??{})},
+                   macros:normalizeMacroSteps(src.macros), locked:false};
     nodes = [...nodes, clone];
     syncSmooth(true); scheduleSave();
     void tick().then(()=>{ clampAllNodesToCanvas(true); queueRender(); });
@@ -393,7 +462,7 @@
   function onNodeClick(event, nodeId) {
     if (event.button!==0) return;
     if (suppressExpandNodeId===nodeId) { suppressExpandNodeId=null; return; }
-    if (nodeId===MAIN_NODE_ID) { expandedNodeId=null; void openSettingsFromMainNode(); return; }
+    if (nodeId===MAIN_NODE_ID) { expandedNodeId=null; return; }
     expandedNodeId = expandedNodeId===nodeId ? null : nodeId;
   }
   function onNodeKeydown(event, nodeId) {
@@ -404,7 +473,9 @@
   }
   function onNodeDoubleClick(node) {
     if (node.id===MAIN_NODE_ID) { expandedNodeId=null; void openSettingsFromMainNode(); return; }
-    void launchNode(node,'open-path');
+    if (isScriptNode(node) && hasLaunchTarget(node,'run-script')) {
+      void launchNode(node,'run-script');
+    }
   }
 
   /* ─── Node element registry ──────────────────────────────────────── */
@@ -490,15 +561,27 @@
 
   /* ─── Editor modal ───────────────────────────────────────────────── */
   function closeCtx()    { if (!contextMenu.open) return; contextMenu={open:false,x:0,y:0,nodeId:null}; highlightNodeId=hoveredId; }
-  function closeEditor() { if (!editPopup.open)   return; editPopup={open:false,nodeId:null}; editDraft=createEditDraft(); editSelectedLinks=[]; }
+  function closeEditor() {
+    if (!editPopup.open) return;
+    editPopup={open:false,nodeId:null};
+    editDraft=createEditDraft();
+    editSelectedLinks=[];
+    editMacroSteps=[];
+    editScriptUpload=null;
+  }
 
   function openEditor(nodeId) {
     if (isLockedNode(nodeId)) return;
     const node=nodes.find(n=>n.id===nodeId); if (!node) return;
     editDraft = {name:node.name??'', icon:node.icon??'', description:node.description??'',
                  path:node.targets?.path??'', editor:node.targets?.editor??'',
-                 browser:node.targets?.browser??'', script:node.targets?.script??'', color:node.color??'slate'};
+                 browser:node.targets?.browser??'', script:node.targets?.script??'', color:node.color??'slate',
+                 node_type:normalizeNodeType(node.node_type),
+                 uploaded_script_path:node.uploaded_script_path??'',
+                 uploaded_script_name:node.uploaded_script_name??''};
     editSelectedLinks = [...(node.links??[])];
+    editMacroSteps = normalizeMacroSteps(node.macros);
+    editScriptUpload = null;
     editPopup = {open:true, nodeId};
   }
   function clearUploadedNodeIcon()  { editDraft={...editDraft, icon:''}; }
@@ -511,23 +594,98 @@
     reader.onload=()=>{ if (typeof reader.result==='string') editDraft={...editDraft, icon:reader.result}; updateStatus('Icon uploaded'); };
     reader.readAsDataURL(file); input.value='';
   }
+  function handleNodeScriptUpload(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > MAX_SCRIPT_UPLOAD_BYTES) {
+      updateStatus('Script must be ≤ 1 MB');
+      input.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') return;
+      editScriptUpload = {name: file.name, content: reader.result};
+      editDraft = {
+        ...editDraft,
+        uploaded_script_name: file.name,
+        uploaded_script_path: ''
+      };
+      updateStatus('Script file selected');
+    };
+    reader.onerror = () => updateStatus('Failed to read script file');
+    reader.readAsText(file);
+    input.value = '';
+  }
+  function clearUploadedScriptSelection() {
+    editScriptUpload = null;
+    editDraft = {...editDraft, uploaded_script_path:'', uploaded_script_name:''};
+  }
+  function addMacroStep() {
+    editMacroSteps = [...editMacroSteps, createMacroStep()];
+  }
+  function removeMacroStep(index) {
+    editMacroSteps = editMacroSteps.filter((_, i) => i !== index);
+  }
+  function updateMacroAction(index, action) {
+    editMacroSteps = editMacroSteps.map((step, i) => {
+      if (i !== index) return step;
+      const nextAction = MACRO_ACTIONS.includes(action) ? action : 'run-script';
+      const nextValue = nextAction === 'delay' && !step.value.trim() ? '1000' : step.value;
+      return {...step, action: nextAction, value: nextValue};
+    });
+  }
+  function updateMacroValue(index, value) {
+    editMacroSteps = editMacroSteps.map((step, i) => i===index ? {...step, value} : step);
+  }
   function toggleEditLink(targetId, enabled) {
     editSelectedLinks = enabled
       ? [...new Set([...editSelectedLinks, targetId])]
       : editSelectedLinks.filter(id=>id!==targetId);
   }
-  function saveEditor() {
+  async function saveEditor() {
     if (!editPopup.nodeId||isLockedNode(editPopup.nodeId)) return;
     const nodeId=editPopup.nodeId;
     const normalizedIcon = isImageIcon(editDraft.icon) ? editDraft.icon : editDraft.icon.trim();
+    const nextType = normalizeNodeType(editDraft.node_type);
+    let uploadedScriptPath = normalizeOptionalString(editDraft.uploaded_script_path);
+    let uploadedScriptName = normalizeOptionalString(editDraft.uploaded_script_name);
+
+    if (nextType === 'script' && editScriptUpload) {
+      try {
+        const saved = await invoke('save_uploaded_script', {
+          fileName: editScriptUpload.name,
+          content: editScriptUpload.content
+        });
+        uploadedScriptPath = normalizeOptionalString(saved?.path);
+        uploadedScriptName = normalizeOptionalString(saved?.name) || editScriptUpload.name;
+      } catch (e) {
+        updateStatus(`Script upload failed: ${String(e)}`);
+        return;
+      }
+    }
+
+    if (nextType !== 'script') {
+      uploadedScriptPath = null;
+      uploadedScriptName = null;
+    }
+
+    const normalizedMacros = normalizeMacroSteps(editMacroSteps);
+
     nodes = nodes.map(n=>{
       if (n.id!==nodeId) return n;
       return {...n,
         name:        editDraft.name.trim() || n.name,
         icon:        normalizedIcon,
         description: editDraft.description.trim(),
+        node_type:   nextType,
+        uploaded_script_path: uploadedScriptPath,
+        uploaded_script_name: uploadedScriptName,
         color:       NODE_COLORS.includes(editDraft.color) ? editDraft.color : 'slate',
         links:       [...new Set(editSelectedLinks.filter(id=>id!==nodeId))],
+        macros:      normalizedMacros,
         targets:     { path:normalizeOptionalString(editDraft.path), editor:normalizeOptionalString(editDraft.editor),
                        browser:normalizeOptionalString(editDraft.browser), script:normalizeOptionalString(editDraft.script) }
       };
@@ -589,7 +747,8 @@
   function hasLaunchTarget(node, action) {
     if (action==='open-path')    return Boolean(node?.targets?.path);
     if (action==='open-browser') return Boolean(node?.targets?.browser);
-    if (action==='run-script')   return Boolean(node?.targets?.script);
+    if (action==='run-script')   return Boolean(nodeScriptTarget(node));
+    if (action==='run-macro')    return Array.isArray(node?.macros) && node.macros.length > 0;
     if (action==='open-editor')  return Boolean(node?.targets?.editor||node?.targets?.path);
     return false;
   }
@@ -718,7 +877,7 @@
   <!-- ══════════════════════ NODE BOARD WINDOW ════════════════════════ -->
   {#if isNodeBoardWindow}
     <main class="nodeboard-shell">
-      <div class="nodeboard-frame" style="--board-opacity:{boardOpacity / 100}">
+      <div class="nodeboard-frame">
 
         <!-- Title bar -->
         <div class="nodeboard-titlebar" data-tauri-drag-region>
@@ -733,8 +892,11 @@
         <!-- Canvas: bind canvasEl here (outer, unscaled logical container) -->
         <div class="canvas" bind:this={canvasEl} on:wheel|passive={onWheelZoom}>
 
-          <!-- Decorative dot-grid background -->
-          <div class="canvas-dots" aria-hidden="true"></div>
+          <!-- Decorative background affected by opacity slider -->
+          <div class="canvas-background" style="--board-bg-opacity:{boardOpacity / 100}" aria-hidden="true">
+            <div class="canvas-glow"></div>
+            <div class="canvas-dots"></div>
+          </div>
 
           <!-- Zoom root: both SVG links + nodes scale together -->
           <div class="zoom-root"
@@ -817,6 +979,14 @@
                         <span>▶</span><span class="action-label">Run</span>
                       </button>
                     {/if}
+                    {#if hasLaunchTarget(node,'run-macro')}
+                      <button class="action-btn action-btn--macro"
+                        on:pointerdown|stopPropagation
+                        on:click|stopPropagation={()=>void launchNode(node,'run-macro')}
+                        title="Run macro">
+                        <span>⚡</span><span class="action-label">Macro</span>
+                      </button>
+                    {/if}
                     {#if !isLockedNode(node)}
                       <button class="action-btn action-btn--edit"
                         on:pointerdown|stopPropagation
@@ -874,23 +1044,29 @@
 
         <!-- Status strip -->
         <div class="nb-status">
-          <span class="nb-status-dot"></span>
-          <span class="nb-status-text">{statusText}</span>
-          <div class="nb-opacity" title="Node board opacity">
-            <span class="nb-opacity-label">Opacity</span>
-            <input
-              class="nb-opacity-slider"
-              type="range"
-              min={BOARD_OPACITY_MIN}
-              max={BOARD_OPACITY_MAX}
-              step="1"
-              value={boardOpacity}
-              on:input={e=>setBoardOpacity(e.currentTarget.value)}
-              aria-label="Node board opacity"
-            />
-            <span class="nb-opacity-value">{boardOpacity}%</span>
+          <div class="nb-status-left">
+            <span class="nb-status-dot"></span>
+            <span class="nb-status-text">{statusText}</span>
           </div>
-          <span class="nb-status-count">{nodes.length} nodes</span>
+          <div class="nb-status-center">
+            <div class="nb-opacity" title="Node board opacity">
+              <span class="nb-opacity-label">Opacity</span>
+              <input
+                class="nb-opacity-slider"
+                type="range"
+                min={BOARD_OPACITY_MIN}
+                max={BOARD_OPACITY_MAX}
+                step="1"
+                value={boardOpacity}
+                on:input={e=>setBoardOpacity(e.currentTarget.value)}
+                aria-label="Node board opacity"
+              />
+              <span class="nb-opacity-value">{boardOpacity}%</span>
+            </div>
+          </div>
+          <div class="nb-status-right">
+            <span class="nb-status-count">{nodes.length} nodes</span>
+          </div>
         </div>
 
       </div><!-- /nodeboard-frame -->
@@ -1026,6 +1202,14 @@
         </div>
 
         <label class="field">
+          <span>Node type</span>
+          <select bind:value={editDraft.node_type}>
+            <option value="default">Default</option>
+            <option value="script">Script</option>
+          </select>
+        </label>
+
+        <label class="field">
           <span>Upload icon image</span>
           <input type="file" accept="image/*" on:change={handleNodeIconUpload} />
         </label>
@@ -1056,10 +1240,42 @@
             <input bind:value={editDraft.browser} placeholder="https://example.com" />
           </label>
           <label class="field">
-            <span>▶ Script command</span>
+            <span>{editDraft.node_type==='script' ? '▶ Script command (fallback)' : '▶ Script command'}</span>
             <input bind:value={editDraft.script} placeholder="npm run dev" />
           </label>
         </div>
+
+        {#if editDraft.node_type==='script'}
+          <label class="field">
+            <span>Upload script file</span>
+            <input
+              type="file"
+              accept=".sh,.bash,.zsh,.command,.bat,.cmd,.ps1,.py,.js,.ts,.rb,.pl,text/*"
+              on:change={handleNodeScriptUpload}
+            />
+          </label>
+
+          <div class="script-upload-info">
+            {#if editScriptUpload}
+              <span>Selected file: {editScriptUpload.name}</span>
+            {:else if editDraft.uploaded_script_name}
+              <span>Saved file: {editDraft.uploaded_script_name}</span>
+            {:else}
+              <span>No uploaded script file selected.</span>
+            {/if}
+            <button
+              type="button"
+              class="btn-ghost"
+              disabled={!editScriptUpload && !editDraft.uploaded_script_path}
+              on:click={clearUploadedScriptSelection}
+            >
+              Remove upload
+            </button>
+          </div>
+          {#if editDraft.uploaded_script_path}
+            <p class="script-upload-path" title={editDraft.uploaded_script_path}>{editDraft.uploaded_script_path}</p>
+          {/if}
+        {/if}
 
         <!-- Color picker -->
         <label class="field">
@@ -1080,6 +1296,35 @@
             {/each}
           </div>
         </label>
+
+        <section class="links-section">
+          <h4>Macros</h4>
+          <div class="macro-list">
+            {#if editMacroSteps.length===0}
+              <p class="muted" style="padding:8px">No macro steps yet.</p>
+            {:else}
+              {#each editMacroSteps as step, index (index)}
+                <div class="macro-row">
+                  <select
+                    value={step.action}
+                    on:change={e=>updateMacroAction(index, e.currentTarget.value)}
+                  >
+                    {#each MACRO_ACTIONS as action}
+                      <option value={action}>{macroActionLabel(action)}</option>
+                    {/each}
+                  </select>
+                  <input
+                    value={step.value}
+                    placeholder={macroValuePlaceholder(step.action)}
+                    on:input={e=>updateMacroValue(index, e.currentTarget.value)}
+                  />
+                  <button type="button" class="btn-danger-xs" on:click={()=>removeMacroStep(index)}>✕</button>
+                </div>
+              {/each}
+            {/if}
+          </div>
+          <button type="button" class="btn-ghost" on:click={addMacroStep}>＋ Add macro step</button>
+        </section>
 
         <!-- Links -->
         <section class="links-section">
@@ -1120,6 +1365,7 @@
         <button disabled={!hasLaunchTarget(contextNode,'open-editor')}  on:click={()=>launchFromContext('open-editor')}> ✏️ Open editor</button>
         <button disabled={!hasLaunchTarget(contextNode,'open-browser')} on:click={()=>launchFromContext('open-browser')}>🌐 Open browser</button>
         <button disabled={!hasLaunchTarget(contextNode,'run-script')}   on:click={()=>launchFromContext('run-script')}>  ▶ Run script</button>
+        <button disabled={!hasLaunchTarget(contextNode,'run-macro')}    on:click={()=>launchFromContext('run-macro')}>  ⚡ Run macro</button>
       </div>
       <div class="ctx-sep"></div>
       <div class="ctx-group">
@@ -1398,7 +1644,6 @@
       0 40px 80px rgba(0,0,0,.55),
       inset 0 1px 0 rgba(255,255,255,.06),
       inset 0 -1px 0 rgba(0,0,0,.15);
-    opacity:var(--board-opacity, 1);
     position:relative;
   }
 
@@ -1430,7 +1675,20 @@
   .canvas {
     position:relative; flex:1; min-height:0;
     overflow:hidden;
-    /* Subtle inner gradient overlay */
+    background:transparent;
+  }
+
+  .canvas-background {
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    z-index:0;
+    opacity:var(--board-bg-opacity, 1);
+  }
+
+  .canvas-glow {
+    position:absolute;
+    inset:0;
     background:
       radial-gradient(ellipse at 18% 12%, rgba(94,231,247,.04) 0%, transparent 50%),
       radial-gradient(ellipse at 82% 88%, rgba(176,158,255,.03) 0%, transparent 50%),
@@ -1439,7 +1697,7 @@
 
   /* Dot-grid pattern */
   .canvas-dots {
-    position:absolute; inset:0; pointer-events:none; z-index:0;
+    position:absolute; inset:0; pointer-events:none;
     opacity:.22;
     background-image:radial-gradient(circle, rgba(94,231,247,.55) 1px, transparent 1px);
     background-size:28px 28px;
@@ -1451,6 +1709,7 @@
     width:100%; height:100%;
     transform-origin:0 0;
     will-change:transform;
+    z-index:1;
   }
 
   /* ── SVG links ───────────────────────────────────────────────────── */
@@ -1637,6 +1896,7 @@
   .action-btn--editor:hover { color:#b09eff; border-color:rgba(176,158,255,.3); background:rgba(176,158,255,.08); }
   .action-btn--browser:hover{ color:#5ee7f7; border-color:rgba(94,231,247,.3);  background:rgba(94,231,247,.08); }
   .action-btn--script:hover { color:#fdd87a; border-color:rgba(253,216,122,.3); background:rgba(253,216,122,.08); }
+  .action-btn--macro:hover  { color:#c4a8ff; border-color:rgba(196,168,255,.3); background:rgba(196,168,255,.08); }
   .action-btn--edit:hover   { color:#8fa3b5; border-color:rgba(143,163,181,.3); background:rgba(143,163,181,.08); }
   .action-label { font-size:.6rem; letter-spacing:.02em; }
 
@@ -1663,10 +1923,27 @@
   /* ── Status strip ────────────────────────────────────────────────── */
   .nb-status {
     flex-shrink:0; height:26px;
-    display:flex; align-items:center; gap:8px; padding:0 14px;
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
+    align-items:center;
+    gap:8px;
+    padding:0 14px;
     background:rgba(4,7,12,.45);
     border-top:1px solid rgba(94,231,247,.06);
     border-radius:0 0 20px 20px;
+  }
+  .nb-status-left,
+  .nb-status-right {
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-width:0;
+  }
+  .nb-status-right { justify-content:flex-end; }
+  .nb-status-center {
+    display:flex;
+    align-items:center;
+    justify-content:center;
   }
   .nb-status-dot {
     width:6px; height:6px; border-radius:50%;
@@ -1674,13 +1951,13 @@
     animation:nb-pulse 2s ease-in-out infinite; flex-shrink:0;
   }
   @keyframes nb-pulse { 0%,100%{opacity:.4;transform:scale(.8);} 50%{opacity:1;transform:scale(1.1);} }
-  .nb-status-text  { flex:1; font-size:.62rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .nb-status-text  { flex:1; min-width:0; font-size:.62rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .nb-opacity {
     display:flex;
     align-items:center;
     gap:6px;
     flex-shrink:0;
-    min-width:164px;
+    min-width:182px;
   }
   .nb-opacity-label,
   .nb-opacity-value {
@@ -1756,13 +2033,14 @@
     letter-spacing:.1em; color:var(--dim);
   }
   .field input:not([type=file]):not([type=checkbox]),
+  .field select,
   .field textarea {
     width:100%; font:inherit; font-size:.8rem; color:var(--text);
     border-radius:var(--r-sm); border:1px solid var(--border);
     background:rgba(6,9,15,.75); padding:8px 10px; outline:none;
     transition:border-color 150ms, box-shadow 150ms;
   }
-  .field input:focus, .field textarea:focus {
+  .field input:focus, .field select:focus, .field textarea:focus {
     border-color:rgba(94,231,247,.38); box-shadow:0 0 0 3px rgba(94,231,247,.06);
   }
   .field input[type=file] {
@@ -1771,6 +2049,26 @@
     border-radius:var(--r-sm); padding:8px; width:100%;
   }
   .field-group { display:flex; flex-direction:column; gap:8px; }
+  .script-upload-info {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    border:1px dashed rgba(110,165,200,.2);
+    border-radius:var(--r-sm);
+    background:rgba(6,9,15,.4);
+    padding:8px 10px;
+    font-size:.74rem;
+    color:var(--soft);
+  }
+  .script-upload-path {
+    margin:0;
+    font-size:.7rem;
+    color:var(--dim);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
   .icon-preview {
     display:flex; align-items:center; gap:12px; padding:10px;
     background:rgba(94,231,247,.03); border:1px dashed rgba(94,231,247,.2); border-radius:var(--r-md);
@@ -1800,6 +2098,41 @@
     text-transform:uppercase; letter-spacing:.1em; color:var(--dim);
   }
   .links-list { display:flex; flex-direction:column; gap:4px; max-height:150px; overflow:auto; }
+  .macro-list {
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+    margin-bottom:8px;
+    max-height:168px;
+    overflow:auto;
+  }
+  .macro-row {
+    display:grid;
+    grid-template-columns:minmax(0,148px) minmax(0,1fr) auto;
+    gap:6px;
+    align-items:center;
+    border:1px solid var(--bsoft);
+    border-radius:var(--r-sm);
+    padding:6px;
+    background:rgba(6,9,15,.45);
+  }
+  .macro-row select,
+  .macro-row input {
+    width:100%;
+    font:inherit;
+    font-size:.74rem;
+    color:var(--text);
+    border-radius:6px;
+    border:1px solid var(--border);
+    background:rgba(6,9,15,.75);
+    padding:6px 8px;
+    outline:none;
+  }
+  .macro-row select:focus,
+  .macro-row input:focus {
+    border-color:rgba(94,231,247,.38);
+    box-shadow:0 0 0 2px rgba(94,231,247,.06);
+  }
   .link-row {
     display:flex; align-items:center; gap:9px; font-size:.78rem;
     border:1px solid var(--bsoft); border-radius:var(--r-sm); padding:7px 10px;
@@ -1904,8 +2237,18 @@
     .btn-row         { grid-template-columns:1fr 1fr; }
     .sel-bar         { grid-template-columns:1fr 1fr; }
     .nodeboard-frame { border-radius:12px; }
+    .nb-status {
+      grid-template-columns:minmax(0,1fr) auto;
+    }
+    .nb-status-right {
+      display:none;
+    }
     .nb-opacity      { min-width:128px; gap:4px; }
     .nb-opacity-label{ display:none; }
     .nb-opacity-slider { width:72px; }
+    .script-upload-info {
+      flex-direction:column;
+      align-items:flex-start;
+    }
   }
 </style>

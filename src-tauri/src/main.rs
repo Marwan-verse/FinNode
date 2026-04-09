@@ -120,6 +120,12 @@ struct ProjectNode {
     y: f64,
     links: Vec<String>,
     targets: LaunchTargets,
+    #[serde(default = "default_node_type")]
+    node_type: String,
+    #[serde(default)]
+    uploaded_script_path: Option<String>,
+    #[serde(default)]
+    uploaded_script_name: Option<String>,
     #[serde(default)]
     color: Option<String>,
     #[serde(default)]
@@ -130,6 +136,12 @@ struct ProjectNode {
     collapsed: bool,
     #[serde(default)]
     last_launched: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UploadedScriptInfo {
+    path: String,
+    name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +158,8 @@ struct Workspace {
 }
 
 fn default_zoom() -> f64 { 1.0 }
+
+fn default_node_type() -> String { "default".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -214,11 +228,16 @@ fn save_layout(state: State<'_, AppState>, layout: AppLayout) -> Result<(), Stri
 
 #[tauri::command]
 fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) -> Result<(), String> {
+    let script_target = node
+        .uploaded_script_path
+        .clone()
+        .or(node.targets.script.clone());
+
     let command_str = match action.as_str() {
         "open-path" => node.targets.path.clone().unwrap_or_default(),
         "open-editor" => node.targets.editor.clone().or(node.targets.path.clone()).unwrap_or_default(),
         "open-browser" => node.targets.browser.clone().unwrap_or_default(),
-        "run-script" => node.targets.script.clone().unwrap_or_default(),
+        "run-script" => script_target.clone().unwrap_or_default(),
         _ => String::new(),
     };
 
@@ -235,7 +254,7 @@ fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) ->
             if let Some(url) = &node.targets.browser { open_target(url)?; }
         }
         "run-script" => {
-            if let Some(script) = &node.targets.script {
+            if let Some(script) = script_target.as_deref() {
                 run_script(script, node.targets.path.as_deref())?;
             }
         }
@@ -264,6 +283,7 @@ fn run_node_macro(steps: Vec<MacroStep>) -> Result<(), String> {
             match step.action.as_str() {
                 "open-path" | "open-browser" => { let _ = open_target(&step.value); }
                 "run-script" => { let _ = run_script(&step.value, None); }
+                "open-application" => { let _ = run_script(&step.value, None); }
                 "open-editor" => { let _ = launch_code(&step.value); }
                 "delay" => {
                     let ms: u64 = step.value.parse().unwrap_or(1000);
@@ -274,6 +294,39 @@ fn run_node_macro(steps: Vec<MacroStep>) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+#[tauri::command]
+fn save_uploaded_script(
+    state: State<'_, AppState>,
+    file_name: String,
+    content: String,
+) -> Result<UploadedScriptInfo, String> {
+    if content.trim().is_empty() {
+        return Err("uploaded script is empty".into());
+    }
+
+    let parent = state
+        .layout_path
+        .parent()
+        .ok_or("unable to resolve config directory")?;
+    let scripts_dir = parent.join("scripts");
+    fs::create_dir_all(&scripts_dir).map_err(|e| e.to_string())?;
+
+    let safe_name = sanitize_file_name(&file_name);
+    let script_path = next_available_script_path(&scripts_dir, &safe_name);
+    fs::write(&script_path, content.as_bytes()).map_err(|e| e.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
+    }
+
+    Ok(UploadedScriptInfo {
+        path: script_path.to_string_lossy().into_owned(),
+        name: safe_name,
+    })
 }
 
 #[tauri::command]
@@ -843,6 +896,9 @@ fn default_nodes() -> Vec<ProjectNode> {
                 path: Some(".".into()), editor: Some(".".into()),
                 browser: Some("https://example.com".into()), script: Some("npm run build:web".into()),
             },
+            node_type: default_node_type(),
+            uploaded_script_path: None,
+            uploaded_script_name: None,
             color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
         },
         ProjectNode {
@@ -854,6 +910,9 @@ fn default_nodes() -> Vec<ProjectNode> {
                 path: Some(".".into()), editor: Some(".".into()),
                 browser: Some("https://github.com".into()), script: Some("npm run build:web".into()),
             },
+            node_type: default_node_type(),
+            uploaded_script_path: None,
+            uploaded_script_name: None,
             color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
         },
         ProjectNode {
@@ -865,6 +924,9 @@ fn default_nodes() -> Vec<ProjectNode> {
                 path: Some(".".into()), editor: Some(".".into()),
                 browser: Some("https://crates.io".into()), script: Some("cargo check".into()),
             },
+            node_type: default_node_type(),
+            uploaded_script_path: None,
+            uploaded_script_name: None,
             color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
         },
         ProjectNode {
@@ -875,9 +937,62 @@ fn default_nodes() -> Vec<ProjectNode> {
                 path: Some(".".into()), editor: Some(".".into()),
                 browser: Some("https://www.rust-lang.org".into()), script: Some("cargo fmt".into()),
             },
+            node_type: default_node_type(),
+            uploaded_script_path: None,
+            uploaded_script_name: None,
             color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
         },
     ]
+}
+
+fn sanitize_file_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "script.sh".into();
+    }
+
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+
+    if out.is_empty() { "script.sh".into() } else { out }
+}
+
+fn next_available_script_path(dir: &Path, file_name: &str) -> PathBuf {
+    let first = dir.join(file_name);
+    if !first.exists() {
+        return first;
+    }
+
+    let file_path = Path::new(file_name);
+    let stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("script");
+    let ext = file_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| format!(".{s}"))
+        .unwrap_or_default();
+
+    for index in 1.. {
+        let candidate = dir.join(format!("{stem}-{index}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    first
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -1142,7 +1257,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            load_layout, save_layout, launch_node, run_node_macro,
+            load_layout, save_layout, launch_node, run_node_macro, save_uploaded_script,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
             update_node_bounds,
             get_platform,
