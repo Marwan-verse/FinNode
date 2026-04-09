@@ -85,10 +85,16 @@
   const ZOOM_MIN  = 0.3;
   const ZOOM_MAX  = 3.0;
   const ZOOM_STEP = 0.12;
+  const BOARD_OPACITY_MIN = 20;
+  const BOARD_OPACITY_MAX = 100;
+  let boardOpacity = BOARD_OPACITY_MAX;
 
   /* ─── Helpers ────────────────────────────────────────────────────── */
   function zoomIn()  { zoomLevel = Math.min(ZOOM_MAX, parseFloat((zoomLevel + ZOOM_STEP).toFixed(2))); queueRender(); }
   function zoomOut() { zoomLevel = Math.max(ZOOM_MIN, parseFloat((zoomLevel - ZOOM_STEP).toFixed(2))); queueRender(); }
+  function setBoardOpacity(value) {
+    boardOpacity = clamp(Math.round(Number(value) || BOARD_OPACITY_MAX), BOARD_OPACITY_MIN, BOARD_OPACITY_MAX);
+  }
 
   async function minimizeWindow() { try { await appWindow.minimize(); } catch(e) {} }
   async function closeWindow()    { try { await appWindow.close();    } catch(e) {} }
@@ -341,7 +347,7 @@
     if (event.target instanceof Element && event.target.closest('button,input,textarea,select,label,a')) return;
     if (toggleSelect(nodeId, event)) return;
     const node = nodes.find(n=>n.id===nodeId); if (!node) return;
-    closeCtx(); closeEditor();
+    closeCtx();
     draggingId=nodeId; dragMoved=false;
     dragStart = {x:event.clientX, y:event.clientY};
     // dragOffset in logical space
@@ -395,6 +401,10 @@
     event.preventDefault();
     if (nodeId===MAIN_NODE_ID) { expandedNodeId=null; void openSettingsFromMainNode(); return; }
     expandedNodeId = expandedNodeId===nodeId ? null : nodeId;
+  }
+  function onNodeDoubleClick(node) {
+    if (node.id===MAIN_NODE_ID) { expandedNodeId=null; void openSettingsFromMainNode(); return; }
+    void launchNode(node,'open-path');
   }
 
   /* ─── Node element registry ──────────────────────────────────────── */
@@ -529,7 +539,6 @@
   /* ─── Context menu ───────────────────────────────────────────────── */
   function openCtxMenu(event, nodeId) {
     event.preventDefault(); event.stopPropagation();
-    closeEditor();
     const mw=220, mh=300;
     const x=clamp(event.clientX, 8, Math.max(8, window.innerWidth-mw-8));
     const y=clamp(event.clientY, 8, Math.max(8, window.innerHeight-mh-8));
@@ -631,11 +640,10 @@
     const onDown   = e=>{
       if (!(e.target instanceof Element)) return;
       if (!e.target.closest('.context-menu'))  closeCtx();
-      if (!e.target.closest('.editor-modal')&&!e.target.closest('.node__edit')) closeEditor();
       if (!e.target.closest('.node')&&!e.ctrlKey&&!e.metaKey) { selectedIds=new Set(); expandedNodeId=null; }
     };
     const onKey = e=>{
-      if (e.key==='Escape') { closeCtx(); closeEditor(); closeLauncher(); return; }
+      if (e.key==='Escape') { closeCtx(); closeLauncher(); return; }
       if ((e.key.toLowerCase()==='k'&&(e.ctrlKey||e.metaKey))||(e.code==='Space'&&e.altKey)) {
         e.preventDefault(); showLauncher ? closeLauncher() : openLauncher();
       }
@@ -710,15 +718,10 @@
   <!-- ══════════════════════ NODE BOARD WINDOW ════════════════════════ -->
   {#if isNodeBoardWindow}
     <main class="nodeboard-shell">
-      <div class="nodeboard-frame">
+      <div class="nodeboard-frame" style="--board-opacity:{boardOpacity / 100}">
 
         <!-- Title bar -->
         <div class="nodeboard-titlebar" data-tauri-drag-region>
-          <div class="tb-dots">
-            <span class="tb-dot tb-dot--red"   title="Close"   on:click={closeWindow}></span>
-            <span class="tb-dot tb-dot--amber" title="Minimize" on:click={minimizeWindow}></span>
-            <span class="tb-dot tb-dot--green" title="Zoom"></span>
-          </div>
           <span class="tb-label" data-tauri-drag-region>FinNode</span>
           <div class="tb-actions">
             <button class="tb-btn" on:click={addNode}    title="Add node">＋</button>
@@ -775,7 +778,7 @@
                 on:click={e=>onNodeClick(e,node.id)}
                 on:keydown={e=>onNodeKeydown(e,node.id)}
                 on:contextmenu={e=>openCtxMenu(e,node.id)}
-                on:dblclick={()=>void launchNode(node,'open-path')}
+                on:dblclick={()=>onNodeDoubleClick(node)}
                 on:mouseenter={()=>onNodeEnter(node.id)}
                 on:mouseleave={()=>onNodeLeave(node.id)}
               >
@@ -873,6 +876,20 @@
         <div class="nb-status">
           <span class="nb-status-dot"></span>
           <span class="nb-status-text">{statusText}</span>
+          <div class="nb-opacity" title="Node board opacity">
+            <span class="nb-opacity-label">Opacity</span>
+            <input
+              class="nb-opacity-slider"
+              type="range"
+              min={BOARD_OPACITY_MIN}
+              max={BOARD_OPACITY_MAX}
+              step="1"
+              value={boardOpacity}
+              on:input={e=>setBoardOpacity(e.currentTarget.value)}
+              aria-label="Node board opacity"
+            />
+            <span class="nb-opacity-value">{boardOpacity}%</span>
+          </div>
           <span class="nb-status-count">{nodes.length} nodes</span>
         </div>
 
@@ -987,7 +1004,7 @@
   <!-- ══════════════════════ EDITOR MODAL ════════════════════════════ -->
   {#if editPopup.open&&editNode}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <div class="modal-overlay" role="presentation" on:click|self={closeEditor}>
+    <div class="modal-overlay" role="presentation">
       <section class="editor-modal">
         <header class="editor-header">
           <div class="editor-title-row">
@@ -1381,6 +1398,7 @@
       0 40px 80px rgba(0,0,0,.55),
       inset 0 1px 0 rgba(255,255,255,.06),
       inset 0 -1px 0 rgba(0,0,0,.15);
+    opacity:var(--board-opacity, 1);
     position:relative;
   }
 
@@ -1394,16 +1412,6 @@
     cursor:grab; user-select:none;
   }
   .nodeboard-titlebar:active { cursor:grabbing; }
-  .tb-dots { display:flex; gap:5px; align-items:center; flex-shrink:0; }
-  .tb-dot {
-    width:11px; height:11px; border-radius:50%;
-    cursor:pointer; transition:filter 140ms, opacity 140ms;
-    opacity:.7; display:grid; place-items:center; font-size:0;
-  }
-  .tb-dot:hover { opacity:1; filter:brightness(1.15); font-size:.35rem; color:rgba(0,0,0,.6); }
-  .tb-dot--red   { background:#ff5f57; }
-  .tb-dot--amber { background:#febc2e; }
-  .tb-dot--green { background:#28c840; }
   .tb-label {
     flex:1; text-align:center; font-size:.66rem; font-weight:600;
     letter-spacing:.14em; color:rgba(180,210,240,.3);
@@ -1667,6 +1675,52 @@
   }
   @keyframes nb-pulse { 0%,100%{opacity:.4;transform:scale(.8);} 50%{opacity:1;transform:scale(1.1);} }
   .nb-status-text  { flex:1; font-size:.62rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .nb-opacity {
+    display:flex;
+    align-items:center;
+    gap:6px;
+    flex-shrink:0;
+    min-width:164px;
+  }
+  .nb-opacity-label,
+  .nb-opacity-value {
+    font-size:.58rem;
+    color:var(--dim);
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    opacity:.85;
+  }
+  .nb-opacity-value {
+    min-width:34px;
+    text-align:right;
+  }
+  .nb-opacity-slider {
+    appearance:none;
+    width:96px;
+    height:3px;
+    border-radius:999px;
+    background:rgba(94,231,247,.24);
+    outline:none;
+  }
+  .nb-opacity-slider::-webkit-slider-thumb {
+    appearance:none;
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    border:1px solid rgba(94,231,247,.55);
+    background:rgba(10,22,38,.95);
+    box-shadow:0 0 0 1px rgba(94,231,247,.18), 0 0 10px rgba(94,231,247,.22);
+    cursor:pointer;
+  }
+  .nb-opacity-slider::-moz-range-thumb {
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    border:1px solid rgba(94,231,247,.55);
+    background:rgba(10,22,38,.95);
+    box-shadow:0 0 0 1px rgba(94,231,247,.18), 0 0 10px rgba(94,231,247,.22);
+    cursor:pointer;
+  }
   .nb-status-count { font-size:.62rem; color:var(--dim); flex-shrink:0; opacity:.6; }
 
   /* ════════════════ MODALS ══════════════════════════════════════════ */
@@ -1850,5 +1904,8 @@
     .btn-row         { grid-template-columns:1fr 1fr; }
     .sel-bar         { grid-template-columns:1fr 1fr; }
     .nodeboard-frame { border-radius:12px; }
+    .nb-opacity      { min-width:128px; gap:4px; }
+    .nb-opacity-label{ display:none; }
+    .nb-opacity-slider { width:72px; }
   }
 </style>

@@ -400,10 +400,7 @@ fn show_settings_view(app: AppHandle, _state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 fn pin_desktop_bottom(app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if let Some(desktop) = app.get_window("desktop") {
-        set_window_bottom_native(&desktop)?;
-    }
+    set_window_bottom(app);
     Ok(())
 }
 
@@ -415,13 +412,18 @@ fn set_window_bottom(app: tauri::AppHandle) {
         #[cfg(target_os = "macos")]
         {
             use objc::{msg_send, sel, sel_impl};
-            let ns_win: *mut objc::runtime::Object = win.ns_window().unwrap() as _;
-            unsafe {
-                // NSWindowLevel::desktopIconWindowLevel = -2147483623
-                let _: () = msg_send![ns_win, setLevel: -2147483623i64];
-                let _: () = msg_send![ns_win, setCollectionBehavior: (1 << 0) | (1 << 4)];
-                //                           NSWindowCollectionBehaviorCanJoinAllSpaces |
-                //                           NSWindowCollectionBehaviorStationary
+            match win.ns_window() {
+                Ok(raw_window) => {
+                    let ns_win: *mut objc::runtime::Object = raw_window as _;
+                    unsafe {
+                        // NSWindowLevel::desktopIconWindowLevel = -2147483623
+                        let _: () = msg_send![ns_win, setLevel: -2147483623i64];
+                        let _: () = msg_send![ns_win, setCollectionBehavior: (1 << 0) | (1 << 4)];
+                        //                           NSWindowCollectionBehaviorCanJoinAllSpaces |
+                        //                           NSWindowCollectionBehaviorStationary
+                    }
+                }
+                Err(e) => eprintln!("failed to get macOS window handle for bottom placement: {e}"),
             }
         }
         // Windows — push window behind all others with HWND_BOTTOM
@@ -432,17 +434,36 @@ fn set_window_bottom(app: tauri::AppHandle) {
                 SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
             };
 
-            let hwnd = win.hwnd().unwrap();
-            unsafe {
-                let _ = SetWindowPos(
-                    HWND(hwnd.0),
-                    HWND_BOTTOM,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-                );
+            match win.hwnd() {
+                Ok(hwnd) => unsafe {
+                    let _ = SetWindowPos(
+                        HWND(hwnd.0),
+                        HWND_BOTTOM,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                    );
+                },
+                Err(e) => eprintln!("failed to get Windows HWND for bottom placement: {e}"),
+            }
+        }
+
+        // Linux — best-effort keep-below for X11/compatible compositors.
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::GtkWindowExt;
+            use tauri::WindowExtUnix;
+
+            match win.gtk_window() {
+                Ok(gtk_window) => {
+                    gtk_window.set_keep_below(true);
+                    gtk_window.set_skip_taskbar_hint(true);
+                    gtk_window.set_skip_pager_hint(true);
+                    gtk_window.stick();
+                }
+                Err(e) => eprintln!("failed to access GTK window for bottom placement: {e}"),
             }
         }
     }
@@ -672,6 +693,7 @@ fn apply_desktop_mode(app: &AppHandle, state: &State<'_, AppState>, visible: boo
         let _ = desktop.set_resizable(true);
         desktop.show().map_err(|e| e.to_string())?;
         let _ = desktop.unminimize();
+        set_window_bottom(app.clone());
 
         #[cfg(target_os = "windows")]
         {
@@ -744,6 +766,7 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
             let _ = desktop.unminimize();
             let _ = desktop.set_decorations(false);
             let _ = desktop.set_resizable(true);
+            set_window_bottom(app.clone());
 
             #[cfg(target_os = "windows")]
             {
@@ -1100,6 +1123,7 @@ fn main() {
                 let _ = desktop.set_always_on_top(false);
                 let _ = desktop.set_resizable(true);
                 let _ = desktop.show();
+                set_window_bottom(app_handle.clone());
 
                 // Keep WebView2 hit-test visible (WM_NCHITTEST handles click-through)
                 let _ = desktop.set_ignore_cursor_events(false);
