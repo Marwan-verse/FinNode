@@ -277,14 +277,31 @@ fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) ->
 }
 
 #[tauri::command]
-fn run_node_macro(steps: Vec<MacroStep>) -> Result<(), String> {
+fn run_node_macro(
+    steps: Vec<MacroStep>,
+    uploaded_script_path: Option<String>,
+    working_dir: Option<String>,
+) -> Result<(), String> {
+    let uploaded_script_path = normalize_optional_owned(uploaded_script_path);
+    let working_dir = normalize_optional_owned(working_dir);
+
+    if steps.iter().any(|step| step.action == "run-uploaded-script") && uploaded_script_path.is_none() {
+        return Err("No uploaded script configured for this node".into());
+    }
+
     thread::spawn(move || {
         for step in &steps {
             match step.action.as_str() {
                 "open-path" | "open-browser" => { let _ = open_target(&step.value); }
-                "run-script" => { let _ = run_script(&step.value, None); }
+                "run-script" => { let _ = run_script(&step.value, working_dir.as_deref()); }
+                "run-uploaded-script" => {
+                    if let Some(script) = uploaded_script_path.as_deref() {
+                        let _ = run_script(script, working_dir.as_deref());
+                    }
+                }
                 "open-application" => { let _ = run_script(&step.value, None); }
                 "open-editor" => { let _ = launch_code(&step.value); }
+                "type-text" => { let _ = type_text(&step.value); }
                 "delay" => {
                     let ms: u64 = step.value.parse().unwrap_or(1000);
                     thread::sleep(std::time::Duration::from_millis(ms));
@@ -1032,18 +1049,185 @@ fn launch_code(path: &str) -> Result<(), String> {
     open::that(path).map(|_| ()).map_err(|e| e.to_string())
 }
 
-fn run_script(script: &str, cwd: Option<&str>) -> Result<(), String> {
+fn normalize_optional_owned(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn script_file_path(script: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let raw = script.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let candidate = Path::new(raw);
+    if candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+
+    if let Some(base) = cwd {
+        let joined = Path::new(base).join(candidate);
+        if joined.is_file() {
+            return Some(joined);
+        }
+    }
+
+    None
+}
+
+fn run_shell_command(command: &str, cwd: Option<&str>) -> Result<(), String> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
-        c.args(["/C", script]);
+        c.args(["/C", command]);
         c
     } else {
         let mut c = Command::new("sh");
-        c.args(["-lc", script]);
+        c.args(["-lc", command]);
         c
     };
-    if let Some(cwd) = cwd { cmd.current_dir(cwd); }
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn run_script_file(path: &Path, cwd: Option<&str>) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        if ext == "bat" || ext == "cmd" {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(path);
+            c
+        } else if ext == "ps1" {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(path);
+            c
+        } else if ext == "sh" || ext == "bash" || ext == "zsh" || ext == "command" {
+            let mut c = Command::new("sh");
+            c.arg(path);
+            c
+        } else {
+            Command::new(path)
+        }
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        if ext == "sh" || ext == "bash" || ext == "zsh" || ext == "command" {
+            // Always route shell scripts through sh so uploaded files run even without shebang.
+            let mut c = Command::new("sh");
+            c.arg(path);
+            c
+        } else {
+            Command::new(path)
+        }
+    };
+
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn type_text(value: &str) -> Result<(), String> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut saw_tool = false;
+
+        let xdotool = Command::new("xdotool")
+            .args(["type", "--delay", "1", "--"])
+            .arg(text)
+            .status();
+        match xdotool {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => saw_tool = true,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+
+        let wtype = Command::new("wtype").arg(text).status();
+        match wtype {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => saw_tool = true,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+
+        if !saw_tool {
+            return Err("Typing requires xdotool or wtype on Linux".into());
+        }
+
+        return Err("Failed to type text using Linux input tools".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
+        let status = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("osascript failed to type text".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = text
+            .replace('`', "``")
+            .replace('"', "`\"");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\"{escaped}\")"
+        );
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("PowerShell SendKeys failed to type text".into());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Typing is not supported on this platform".into())
+}
+
+fn run_script(script: &str, cwd: Option<&str>) -> Result<(), String> {
+    let trimmed = script.trim();
+    if trimmed.is_empty() {
+        return Err("script command is empty".into());
+    }
+
+    if let Some(path) = script_file_path(trimmed, cwd) {
+        return run_script_file(&path, cwd);
+    }
+
+    run_shell_command(trimmed, cwd)
 }
 
 fn config_dir() -> Result<PathBuf, String> {

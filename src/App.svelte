@@ -17,7 +17,7 @@
 
   const NODE_COLORS    = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
   const NODE_TYPES     = ['default', 'script'];
-  const MACRO_ACTIONS  = ['run-script', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
+  const MACRO_ACTIONS  = ['run-script', 'run-uploaded-script', 'type-text', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
   const NODE_COLOR_MAP = {
     slate:  '#8fa3b5',
     cyan:   '#5ee7f7',
@@ -130,13 +130,18 @@
     const value = typeof raw?.value === 'string' ? raw.value : '';
     return {action, value};
   }
+  function macroActionNeedsValue(action) {
+    return action !== 'delay' && action !== 'run-uploaded-script';
+  }
   function normalizeMacroSteps(steps) {
     return (Array.isArray(steps) ? steps : [])
       .map(normalizeMacroStep)
-      .filter(step => step.action === 'delay' ? true : step.value.trim().length > 0);
+      .filter(step => macroActionNeedsValue(step.action) ? step.value.trim().length > 0 : true);
   }
   function macroActionLabel(action) {
     if (action === 'run-script') return 'Run script';
+    if (action === 'run-uploaded-script') return 'Run uploaded script';
+    if (action === 'type-text') return 'Type text';
     if (action === 'open-path') return 'Open path';
     if (action === 'open-editor') return 'Open editor';
     if (action === 'open-browser') return 'Open browser';
@@ -146,6 +151,8 @@
   }
   function macroValuePlaceholder(action) {
     if (action === 'run-script') return 'npm run dev';
+    if (action === 'run-uploaded-script') return 'Uses this node uploaded script file';
+    if (action === 'type-text') return 'hello world';
     if (action === 'open-path') return '/path/to/project';
     if (action === 'open-editor') return 'code /path/to/project';
     if (action === 'open-browser') return 'https://example.com';
@@ -320,7 +327,11 @@
           updateStatus('No macro steps configured');
           return;
         }
-        await invoke('run_node_macro', {steps});
+        await invoke('run_node_macro', {
+          steps,
+          uploadedScriptPath: normalizeOptionalString(node?.uploaded_script_path),
+          workingDir: normalizeOptionalString(node?.targets?.path)
+        });
       } else {
         await invoke('launch_node', {node, action});
       }
@@ -633,7 +644,7 @@
     editMacroSteps = editMacroSteps.map((step, i) => {
       if (i !== index) return step;
       const nextAction = MACRO_ACTIONS.includes(action) ? action : 'run-script';
-      const nextValue = nextAction === 'delay' && !step.value.trim() ? '1000' : step.value;
+      const nextValue = nextAction === 'delay' && !step.value.trim() ? '1000' : (nextAction === 'run-uploaded-script' ? '' : step.value);
       return {...step, action: nextAction, value: nextValue};
     });
   }
@@ -1316,6 +1327,7 @@
                   <input
                     value={step.value}
                     placeholder={macroValuePlaceholder(step.action)}
+                    disabled={step.action==='run-uploaded-script'}
                     on:input={e=>updateMacroValue(index, e.currentTarget.value)}
                   />
                   <button type="button" class="btn-danger-xs" on:click={()=>removeMacroStep(index)}>✕</button>
