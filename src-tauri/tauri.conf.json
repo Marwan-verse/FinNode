@@ -33,8 +33,8 @@
       {
         "label": "main",
         "title": "FinNode",
-        "width": 460,
-        "height": 720,
+        "width": 560,
+        "height": 820,
         "transparent": false,
         "decorations": false,
         "alwaysOnTop": false,
