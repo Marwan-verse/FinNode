@@ -1242,6 +1242,23 @@
               on:mouseenter={() => onNodeEnter(node.id)}
               on:mouseleave={() => onNodeLeave(node.id)}
             >
+              {#if expandedNodeId === node.id}
+                <div class="node__run-actions" role="group" aria-label={`Run options for ${node.name || 'node'}`}>
+                  {#if hasLaunchTarget(node, 'open-path')}
+                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-path')}>Path</button>
+                  {/if}
+                  {#if hasLaunchTarget(node, 'open-editor')}
+                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-editor')}>Edit</button>
+                  {/if}
+                  {#if hasLaunchTarget(node, 'open-browser')}
+                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-browser')}>Web</button>
+                  {/if}
+                  {#if hasLaunchTarget(node, 'run-script')}
+                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'run-script')}>Run</button>
+                  {/if}
+                </div>
+              {/if}
+
               <div class="node__top">
                 <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
                 <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
@@ -1541,11 +1558,19 @@
   .nodeboard-shell {
     width: 100%;
     height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background:
+      radial-gradient(circle at 18% 18%, rgba(77, 208, 225, 0.1), transparent 30%),
+      radial-gradient(circle at 82% 82%, rgba(123, 208, 137, 0.08), transparent 28%),
+      linear-gradient(165deg, #0b1320 0%, #0d1e31 100%);
   }
 
   .nodeboard-canvas {
-    border: 0;
-    border-radius: 0;
+    border: 1px solid rgba(129, 153, 176, 0.26);
+    border-radius: 20px;
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
   }
 
   .sidebar {
@@ -1774,6 +1799,15 @@
     z-index: 0;
   }
 
+  .canvas.nodeboard-canvas {
+    width: min(860px, calc(100vw - 48px));
+    height: min(620px, calc(100vh - 48px));
+    min-height: 380px;
+    background:
+      radial-gradient(circle at 20% 20%, rgba(77, 208, 225, 0.08), transparent 34%),
+      linear-gradient(180deg, rgba(10, 19, 28, 0.82) 0%, rgba(8, 14, 22, 0.97) 100%);
+  }
+
   .links,
   .node-layer {
     position: absolute;
@@ -1801,23 +1835,25 @@
 
   .node {
     position: absolute;
-    width: 96px;
-    height: 96px;
+    width: 104px;
+    height: 104px;
     border-radius: 999px;
-    border: 1px solid rgba(143, 163, 181, 0.32);
-    background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.08), rgba(8, 14, 22, 0.85));
+    border: 1px solid rgba(143, 163, 181, 0.42);
+    background:
+      radial-gradient(circle at 26% 24%, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.02) 48%),
+      linear-gradient(180deg, rgba(11, 20, 30, 0.95), rgba(7, 13, 20, 0.92));
     color: var(--text);
-    padding: 10px;
+    padding: 11px 10px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     pointer-events: auto;
     user-select: none;
     cursor: grab;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
     transform-origin: center;
-    transition: border-color 120ms ease, transform 150ms ease, box-shadow 150ms ease;
+    transition: border-color 120ms ease, transform 180ms ease, box-shadow 180ms ease;
   }
 
   .node--selected {
@@ -1830,19 +1866,55 @@
   }
 
   .node--expanded {
-    transform: scale(1.28);
+    transform: scale(1.24);
     z-index: 8;
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(77, 208, 225, 0.35);
+    box-shadow: 0 16px 30px rgba(0, 0, 0, 0.38), 0 0 0 1px rgba(77, 208, 225, 0.45);
   }
 
   .node--expanded.node--dragging {
-    transform: scale(1.2);
+    transform: scale(1.18);
+  }
+
+  .node__run-actions {
+    position: absolute;
+    top: -36px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(133, 157, 180, 0.35);
+    background: rgba(9, 16, 24, 0.92);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.28);
+    z-index: 12;
+  }
+
+  .node__run-actions button {
+    width: auto;
+    min-width: 0;
+    padding: 3px 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(133, 157, 180, 0.35);
+    background: rgba(12, 22, 34, 0.9);
+    color: var(--text);
+    font-size: 0.6rem;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .node__run-actions button:hover {
+    border-color: rgba(77, 208, 225, 0.62);
+    color: #d7f9ff;
   }
 
   .node__top {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    width: 100%;
     gap: 6px;
   }
 
@@ -1866,8 +1938,8 @@
 
   .node__icon,
   .node__logo {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 999px;
     display: grid;
     place-items: center;
@@ -1884,8 +1956,8 @@
   }
 
   .node__icon-image {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     border-radius: 999px;
     object-fit: cover;
     border: 1px solid rgba(143, 163, 181, 0.3);
@@ -1894,18 +1966,18 @@
 
   .node__name {
     margin-top: auto;
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     text-align: center;
-    max-width: 82px;
+    max-width: 90px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .node__hint {
-    width: 88px;
+    width: 94px;
     margin-top: 2px;
-    font-size: 0.57rem;
+    font-size: 0.58rem;
     line-height: 1.2;
     color: var(--muted);
     text-align: center;
@@ -2122,6 +2194,16 @@
       width: 100%;
       max-height: 100%;
       padding-right: 0;
+    }
+
+    .nodeboard-shell {
+      padding: 10px;
+    }
+
+    .canvas.nodeboard-canvas {
+      width: calc(100vw - 20px);
+      height: calc(100vh - 20px);
+      min-height: 340px;
     }
 
     .settings-window-controls {
