@@ -41,6 +41,8 @@
   let isNodeBoardWindow = false;
 
   let nodeLayer;
+  let nodeLayerResizeObserver = null;
+  let nodeLayerResizeFrame = null;
   const nodeElements = new Map();
   let renderQueued = false;
 
@@ -1086,6 +1088,25 @@
     }
   }
 
+  function scheduleNodeLayerRelayout() {
+    if (nodeLayerResizeFrame !== null) return;
+    nodeLayerResizeFrame = requestAnimationFrame(() => {
+      nodeLayerResizeFrame = null;
+      queueRender();
+      clampAllNodesToCanvas(false);
+    });
+  }
+
+  function setupNodeLayerResizeObserver() {
+    if (typeof ResizeObserver === 'undefined' || !nodeLayer) return;
+    if (nodeLayerResizeObserver) nodeLayerResizeObserver.disconnect();
+
+    nodeLayerResizeObserver = new ResizeObserver(() => {
+      scheduleNodeLayerRelayout();
+    });
+    nodeLayerResizeObserver.observe(nodeLayer);
+  }
+
   async function bootstrap() {
     const unlistenLayout = await listen('layout-updated', () => {
       void loadWorkspaces();
@@ -1097,10 +1118,11 @@
     });
 
     await loadWorkspaces();
+    await tick();
+    setupNodeLayerResizeObserver();
 
     const onResize = () => {
-      queueRender();
-      void tick().then(() => clampAllNodesToCanvas(false));
+      scheduleNodeLayerRelayout();
     };
 
     const onMove = (event) => onPointerMove(event);
@@ -1152,6 +1174,8 @@
       if (saveTimer !== null) clearTimeout(saveTimer);
       if (dragFrame !== null) cancelAnimationFrame(dragFrame);
       if (springFrame !== null) cancelAnimationFrame(springFrame);
+      if (nodeLayerResizeObserver) nodeLayerResizeObserver.disconnect();
+      if (nodeLayerResizeFrame !== null) cancelAnimationFrame(nodeLayerResizeFrame);
     };
   }
 
@@ -1216,68 +1240,70 @@
 {:else}
   {#if isNodeBoardWindow}
     <main class="nodeboard-shell">
-      <div class="canvas nodeboard-canvas" bind:this={nodeLayer}>
-        <svg class="links" {viewBox}>
-          {#each links as link}
-            <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
-          {/each}
-        </svg>
+      <div class="nodeboard-frame">
+        <div class="canvas nodeboard-canvas" bind:this={nodeLayer}>
+          <svg class="links" {viewBox}>
+            {#each links as link}
+              <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
+            {/each}
+          </svg>
 
-        <div class="node-layer">
-          {#each renderNodes as node (node.id)}
-            <div
-              class="node"
-              class:node--selected={selectedIds.has(node.id)}
-              class:node--dragging={draggingId === node.id}
-              class:node--expanded={expandedNodeId === node.id}
-              role="button"
-              tabindex="0"
-              use:nodeRef={node.id}
-              style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
-              on:pointerdown={(event) => beginDrag(event, node.id)}
-              on:click={(event) => onNodeClick(event, node.id)}
-              on:keydown={(event) => onNodeKeydown(event, node.id)}
-              on:contextmenu={(event) => openCtxMenu(event, node.id)}
-              on:dblclick={() => void launchNode(node, 'open-path')}
-              on:mouseenter={() => onNodeEnter(node.id)}
-              on:mouseleave={() => onNodeLeave(node.id)}
-            >
-              {#if expandedNodeId === node.id}
-                <div class="node__run-actions" role="group" aria-label={`Run options for ${node.name || 'node'}`}>
-                  {#if hasLaunchTarget(node, 'open-path')}
-                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-path')}>Path</button>
-                  {/if}
-                  {#if hasLaunchTarget(node, 'open-editor')}
-                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-editor')}>Edit</button>
-                  {/if}
-                  {#if hasLaunchTarget(node, 'open-browser')}
-                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-browser')}>Web</button>
-                  {/if}
-                  {#if hasLaunchTarget(node, 'run-script')}
-                    <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'run-script')}>Run</button>
-                  {/if}
+          <div class="node-layer">
+            {#each renderNodes as node (node.id)}
+              <div
+                class="node"
+                class:node--selected={selectedIds.has(node.id)}
+                class:node--dragging={draggingId === node.id}
+                class:node--expanded={expandedNodeId === node.id}
+                role="button"
+                tabindex="0"
+                use:nodeRef={node.id}
+                style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
+                on:pointerdown={(event) => beginDrag(event, node.id)}
+                on:click={(event) => onNodeClick(event, node.id)}
+                on:keydown={(event) => onNodeKeydown(event, node.id)}
+                on:contextmenu={(event) => openCtxMenu(event, node.id)}
+                on:dblclick={() => void launchNode(node, 'open-path')}
+                on:mouseenter={() => onNodeEnter(node.id)}
+                on:mouseleave={() => onNodeLeave(node.id)}
+              >
+                {#if expandedNodeId === node.id}
+                  <div class="node__run-actions" role="group" aria-label={`Run options for ${node.name || 'node'}`}>
+                    {#if hasLaunchTarget(node, 'open-path')}
+                      <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-path')}>Path</button>
+                    {/if}
+                    {#if hasLaunchTarget(node, 'open-editor')}
+                      <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-editor')}>Edit</button>
+                    {/if}
+                    {#if hasLaunchTarget(node, 'open-browser')}
+                      <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'open-browser')}>Web</button>
+                    {/if}
+                    {#if hasLaunchTarget(node, 'run-script')}
+                      <button on:pointerdown|stopPropagation on:click|stopPropagation={() => void launchNode(node, 'run-script')}>Run</button>
+                    {/if}
+                  </div>
+                {/if}
+
+                <div class="node__top">
+                  <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
+                  <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
                 </div>
-              {/if}
 
-              <div class="node__top">
-                <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
-                <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
+                {#if isImageIcon(node.icon)}
+                  <img class="node__icon-image" src={node.icon} alt={node.name || 'Node icon'} />
+                {:else if isLogoIcon(node.icon)}
+                  <img class="node__logo" src={appLogo} alt="FinNode" />
+                {:else}
+                  <div class="node__icon">{node.icon || 'N'}</div>
+                {/if}
+
+                <div class="node__name">{node.name || 'Untitled'}</div>
+                {#if expandedNodeId === node.id}
+                  <div class="node__hint">{node.description || 'Node expanded'}</div>
+                {/if}
               </div>
-
-              {#if isImageIcon(node.icon)}
-                <img class="node__icon-image" src={node.icon} alt={node.name || 'Node icon'} />
-              {:else if isLogoIcon(node.icon)}
-                <img class="node__logo" src={appLogo} alt="FinNode" />
-              {:else}
-                <div class="node__icon">{node.icon || 'N'}</div>
-              {/if}
-
-              <div class="node__name">{node.name || 'Untitled'}</div>
-              {#if expandedNodeId === node.id}
-                <div class="node__hint">{node.description || 'Node expanded'}</div>
-              {/if}
-            </div>
-          {/each}
+            {/each}
+          </div>
         </div>
       </div>
     </main>
@@ -1567,10 +1593,27 @@
       linear-gradient(165deg, #0b1320 0%, #0d1e31 100%);
   }
 
-  .nodeboard-canvas {
-    border: 1px solid rgba(129, 153, 176, 0.26);
+  .nodeboard-frame {
+    width: 760px;
+    height: 560px;
+    min-width: 460px;
+    min-height: 340px;
+    max-width: calc(100vw - 64px);
+    max-height: calc(100vh - 64px);
+    resize: both;
+    overflow: auto;
+    border: 1px solid rgba(129, 153, 176, 0.3);
     border-radius: 20px;
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+    background: rgba(8, 14, 22, 0.72);
+  }
+
+  .nodeboard-canvas {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .sidebar {
@@ -1800,8 +1843,8 @@
   }
 
   .canvas.nodeboard-canvas {
-    width: min(860px, calc(100vw - 48px));
-    height: min(620px, calc(100vh - 48px));
+    width: 100%;
+    height: 100%;
     min-height: 380px;
     background:
       radial-gradient(circle at 20% 20%, rgba(77, 208, 225, 0.08), transparent 34%),
@@ -2200,9 +2243,16 @@
       padding: 10px;
     }
 
-    .canvas.nodeboard-canvas {
+    .nodeboard-frame {
       width: calc(100vw - 20px);
       height: calc(100vh - 20px);
+      min-width: 320px;
+      min-height: 280px;
+      max-width: calc(100vw - 20px);
+      max-height: calc(100vh - 20px);
+    }
+
+    .canvas.nodeboard-canvas {
       min-height: 340px;
     }
 
