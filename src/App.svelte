@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
+  import { appWindow } from '@tauri-apps/api/window';
   import appLogo from '../src-tauri/icons/icon.png';
 
   const MAIN_NODE_ID = 'main-node';
@@ -11,10 +12,6 @@
   const SAVE_DEBOUNCE_MS = 220;
   const SPRING_STIFFNESS = 0.2;
   const SPRING_DAMPING = 0.82;
-  const BOARD_STATE_KEY = 'finnode.board.v1';
-  const BOARD_DEFAULT_SIZE = { width: 700, height: 700 };
-  const BOARD_MIN_SIZE = { width: 420, height: 420 };
-  const SETTINGS_LAYER_WIDTH = 332;
   const MAX_NODE_ICON_BYTES = 512 * 1024;
 
   const NODE_COLORS = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
@@ -40,6 +37,8 @@
   let statusText = 'Loading...';
   let activityLog = [];
   let fatalError = '';
+  let currentWindowLabel = 'main';
+  let isNodeBoardWindow = false;
 
   let nodeLayer;
   const nodeElements = new Map();
@@ -76,11 +75,6 @@
   let launcherQuery = '';
   let launcherIndex = 0;
   let launcherResults = [];
-  let boardShell;
-  let boardResizeObserver = null;
-  let boardResizeEnabled = false;
-  let boardSize = loadBoardSize();
-  let boardShellStyle = '';
 
   function createEditDraft() {
     return {
@@ -101,92 +95,6 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(value, max));
-  }
-
-  function boardReservedWidth() {
-    if (typeof window === 'undefined') return SETTINGS_LAYER_WIDTH + 60;
-    return window.innerWidth > 980 ? SETTINGS_LAYER_WIDTH + 60 : 40;
-  }
-
-  function clampBoardSize(width, height) {
-    const rawWidth = Number(width) || BOARD_DEFAULT_SIZE.width;
-    const rawHeight = Number(height) || BOARD_DEFAULT_SIZE.height;
-
-    if (typeof window === 'undefined') {
-      return {
-        width: Math.round(Math.max(BOARD_MIN_SIZE.width, rawWidth)),
-        height: Math.round(Math.max(BOARD_MIN_SIZE.height, rawHeight))
-      };
-    }
-
-    const maxWidth = Math.max(BOARD_MIN_SIZE.width, window.innerWidth - boardReservedWidth());
-    const maxHeight = Math.max(BOARD_MIN_SIZE.height, window.innerHeight - 72);
-
-    return {
-      width: Math.round(clamp(rawWidth, BOARD_MIN_SIZE.width, maxWidth)),
-      height: Math.round(clamp(rawHeight, BOARD_MIN_SIZE.height, maxHeight))
-    };
-  }
-
-  function loadBoardSize() {
-    if (typeof window === 'undefined') {
-      return { ...BOARD_DEFAULT_SIZE };
-    }
-
-    try {
-      const raw = localStorage.getItem(BOARD_STATE_KEY);
-      if (!raw) return { ...BOARD_DEFAULT_SIZE };
-      const parsed = JSON.parse(raw);
-      return clampBoardSize(parsed?.width, parsed?.height);
-    } catch {
-      return { ...BOARD_DEFAULT_SIZE };
-    }
-  }
-
-  function persistBoardSize() {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem(BOARD_STATE_KEY, JSON.stringify(boardSize));
-  }
-
-  function applyBoardSize(width, height, persist = true, reclampNodes = true) {
-    const next = clampBoardSize(width, height);
-    if (next.width === boardSize.width && next.height === boardSize.height) return;
-
-    boardSize = next;
-    if (persist) persistBoardSize();
-
-    if (reclampNodes) {
-      void tick().then(() => {
-        clampAllNodesToCanvas(false);
-        queueRender();
-      });
-    }
-  }
-
-  function setupBoardResizeObserver() {
-    if (typeof ResizeObserver === 'undefined' || !boardShell) return;
-    if (boardResizeObserver) {
-      boardResizeObserver.disconnect();
-    }
-
-    boardResizeObserver = new ResizeObserver((entries) => {
-      if (!boardResizeEnabled) return;
-      const rect = entries[0]?.contentRect;
-      if (!rect) return;
-      applyBoardSize(rect.width, rect.height, true, false);
-    });
-
-    boardResizeObserver.observe(boardShell);
-  }
-
-  function toggleBoardResizeMode() {
-    boardResizeEnabled = !boardResizeEnabled;
-    updateStatus(boardResizeEnabled ? 'Board resize unlocked' : 'Board resize locked');
-  }
-
-  function resetBoardSize() {
-    applyBoardSize(BOARD_DEFAULT_SIZE.width, BOARD_DEFAULT_SIZE.height, true, true);
-    updateStatus('Board size reset to 700x700');
   }
 
   function normalizeOptionalString(value) {
@@ -1189,11 +1097,8 @@
     });
 
     await loadWorkspaces();
-    await tick();
-    setupBoardResizeObserver();
 
     const onResize = () => {
-      applyBoardSize(boardSize.width, boardSize.height, true, false);
       queueRender();
       void tick().then(() => clampAllNodesToCanvas(false));
     };
@@ -1247,7 +1152,6 @@
       if (saveTimer !== null) clearTimeout(saveTimer);
       if (dragFrame !== null) cancelAnimationFrame(dragFrame);
       if (springFrame !== null) cancelAnimationFrame(springFrame);
-      if (boardResizeObserver) boardResizeObserver.disconnect();
     };
   }
 
@@ -1269,8 +1173,7 @@
   $: launcherResults = launcherQuery.trim()
     ? nodes.filter((node) => node.name.toLowerCase().includes(launcherQuery.toLowerCase())).slice(0, 8)
     : nodes.slice(0, 8);
-
-  $: boardShellStyle = `width:${boardSize.width}px;height:${boardSize.height}px;`;
+  $: isNodeBoardWindow = currentWindowLabel === 'desktop';
 
   $: {
     const validIds = new Set(nodes.map((node) => node.id));
@@ -1284,6 +1187,8 @@
   }
 
   onMount(() => {
+    currentWindowLabel = appWindow.label ?? 'main';
+
     let disposed = false;
     let cleanup = () => {};
 
@@ -1309,74 +1214,59 @@
 {#if fatalError}
   <pre class="fatal">{fatalError}</pre>
 {:else}
-  <main class="app-shell">
-    <section class="canvas-panel board-layer" aria-label="Node board background layer">
-      <div class="board-shell" class:board-shell--resizable={boardResizeEnabled} style={boardShellStyle} bind:this={boardShell}>
-        <header class="canvas-header">
-          <div>
-            <h2>Node Board</h2>
-            <p>Persistent workspace layer. Ctrl/Cmd+Click to multi-select. Right-click for node actions.</p>
-          </div>
-          <div class="canvas-header__actions">
-            <span class="canvas-header__size">{boardSize.width} x {boardSize.height}</span>
-            <button class:active={boardResizeEnabled} on:click={toggleBoardResizeMode}>
-              {boardResizeEnabled ? 'Lock Resize' : 'Resize Board'}
-            </button>
-            <button on:click={resetBoardSize}>Reset</button>
-          </div>
-        </header>
+  {#if isNodeBoardWindow}
+    <main class="nodeboard-shell">
+      <div class="canvas nodeboard-canvas" bind:this={nodeLayer}>
+        <svg class="links" {viewBox}>
+          {#each links as link}
+            <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
+          {/each}
+        </svg>
 
-        <div class="canvas" bind:this={nodeLayer}>
-          <svg class="links" {viewBox}>
-            {#each links as link}
-              <path class="link" class:link--highlight={highlightNodeId && (link.from === highlightNodeId || link.to === highlightNodeId)} d={link.d}></path>
-            {/each}
-          </svg>
-
-          <div class="node-layer">
-            {#each renderNodes as node (node.id)}
-              <div
-                class="node"
-                class:node--selected={selectedIds.has(node.id)}
-                class:node--dragging={draggingId === node.id}
-                class:node--expanded={expandedNodeId === node.id}
-                role="button"
-                tabindex="0"
-                use:nodeRef={node.id}
-                style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
-                on:pointerdown={(event) => beginDrag(event, node.id)}
-                on:click={(event) => onNodeClick(event, node.id)}
-                on:keydown={(event) => onNodeKeydown(event, node.id)}
-                on:contextmenu={(event) => openCtxMenu(event, node.id)}
-                on:dblclick={() => void launchNode(node, 'open-path')}
-                on:mouseenter={() => onNodeEnter(node.id)}
-                on:mouseleave={() => onNodeLeave(node.id)}
-              >
-                <div class="node__top">
-                  <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
-                  <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
-                </div>
-
-                {#if isImageIcon(node.icon)}
-                  <img class="node__icon-image" src={node.icon} alt={node.name || 'Node icon'} />
-                {:else if isLogoIcon(node.icon)}
-                  <img class="node__logo" src={appLogo} alt="FinNode" />
-                {:else}
-                  <div class="node__icon">{node.icon || 'N'}</div>
-                {/if}
-
-                <div class="node__name">{node.name || 'Untitled'}</div>
-                {#if expandedNodeId === node.id}
-                  <div class="node__hint">{node.description || 'Node expanded'}</div>
-                {/if}
+        <div class="node-layer">
+          {#each renderNodes as node (node.id)}
+            <div
+              class="node"
+              class:node--selected={selectedIds.has(node.id)}
+              class:node--dragging={draggingId === node.id}
+              class:node--expanded={expandedNodeId === node.id}
+              role="button"
+              tabindex="0"
+              use:nodeRef={node.id}
+              style="left:{node.renderX}px;top:{node.renderY}px;--node-color:{nodeColor(node)}"
+              on:pointerdown={(event) => beginDrag(event, node.id)}
+              on:click={(event) => onNodeClick(event, node.id)}
+              on:keydown={(event) => onNodeKeydown(event, node.id)}
+              on:contextmenu={(event) => openCtxMenu(event, node.id)}
+              on:dblclick={() => void launchNode(node, 'open-path')}
+              on:mouseenter={() => onNodeEnter(node.id)}
+              on:mouseleave={() => onNodeLeave(node.id)}
+            >
+              <div class="node__top">
+                <span class="node__dot" class:node__dot--active={Boolean(node.last_launched)}></span>
+                <button class="node__edit" disabled={isLockedNode(node)} on:click|stopPropagation={() => openEditor(node.id)}>Edit</button>
               </div>
-            {/each}
-          </div>
+
+              {#if isImageIcon(node.icon)}
+                <img class="node__icon-image" src={node.icon} alt={node.name || 'Node icon'} />
+              {:else if isLogoIcon(node.icon)}
+                <img class="node__logo" src={appLogo} alt="FinNode" />
+              {:else}
+                <div class="node__icon">{node.icon || 'N'}</div>
+              {/if}
+
+              <div class="node__name">{node.name || 'Untitled'}</div>
+              {#if expandedNodeId === node.id}
+                <div class="node__hint">{node.description || 'Node expanded'}</div>
+              {/if}
+            </div>
+          {/each}
         </div>
       </div>
-    </section>
-
-    <aside class="sidebar settings-layer">
+    </main>
+  {:else}
+    <main class="settings-shell">
+      <aside class="sidebar settings-layer">
       <header class="brand panel">
         <div class="brand__identity">
           <img class="brand__logo" src={appLogo} alt="FinNode" />
@@ -1463,8 +1353,9 @@
           {/if}
         </div>
       </section>
-    </aside>
-  </main>
+      </aside>
+    </main>
+  {/if}
 
   {#if editPopup.open && editNode}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -1638,13 +1529,23 @@
     color: var(--text);
   }
 
-  .app-shell {
+  .settings-shell {
     width: 100%;
     height: 100%;
     padding: 14px;
-    position: relative;
-    overflow: hidden;
-    isolation: isolate;
+    display: flex;
+    align-items: flex-start;
+    overflow: auto;
+  }
+
+  .nodeboard-shell {
+    width: 100%;
+    height: 100%;
+  }
+
+  .nodeboard-canvas {
+    border: 0;
+    border-radius: 0;
   }
 
   .sidebar {
@@ -1859,96 +1760,6 @@
     margin: 0;
     color: var(--muted);
     font-size: 0.78rem;
-  }
-
-  .canvas-panel {
-    min-height: 0;
-  }
-
-  .board-layer {
-    position: absolute;
-    inset: 14px;
-    z-index: 0;
-    padding-left: calc(var(--settings-width) + 18px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    pointer-events: none;
-  }
-
-  .board-shell {
-    width: 700px;
-    height: 700px;
-    min-width: 420px;
-    min-height: 420px;
-    max-width: 100%;
-    max-height: 100%;
-    border-radius: 16px;
-    border: 1px solid rgba(129, 153, 176, 0.24);
-    background: linear-gradient(180deg, rgba(12, 22, 33, 0.94) 0%, rgba(9, 16, 24, 0.97) 100%);
-    box-shadow: 0 20px 34px rgba(0, 0, 0, 0.35);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 12px;
-    pointer-events: auto;
-    overflow: hidden;
-  }
-
-  .board-shell--resizable {
-    resize: both;
-    overflow: hidden;
-    outline: 2px dashed rgba(77, 208, 225, 0.42);
-    outline-offset: -6px;
-  }
-
-  .canvas-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 14px;
-  }
-
-  .canvas-header__actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .canvas-header__actions button {
-    width: auto;
-    padding: 7px 11px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: rgba(9, 17, 25, 0.72);
-    color: var(--text);
-    cursor: pointer;
-    font: inherit;
-    font-size: 0.76rem;
-    white-space: nowrap;
-  }
-
-  .canvas-header__actions button.active {
-    border-color: rgba(77, 208, 225, 0.68);
-    color: #bbf7ff;
-  }
-
-  .canvas-header__size {
-    font-size: 0.75rem;
-    color: var(--muted);
-    white-space: nowrap;
-    padding-right: 2px;
-  }
-
-  .canvas-header h2 {
-    margin: 0;
-    font-size: 1rem;
-  }
-
-  .canvas-header p {
-    margin: 4px 0 0;
-    font-size: 0.82rem;
-    color: var(--muted);
   }
 
   .canvas {
@@ -2303,43 +2114,17 @@
   }
 
   @media (max-width: 980px) {
-    .app-shell {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      overflow: auto;
+    .settings-shell {
+      padding: 10px;
     }
 
     .settings-layer.sidebar {
       width: 100%;
-      max-height: 46vh;
+      max-height: 100%;
       padding-right: 0;
     }
 
-    .board-layer {
-      position: relative;
-      inset: auto;
-      padding-left: 0;
-      pointer-events: auto;
-      min-height: 420px;
-      align-items: stretch;
-      justify-content: stretch;
-    }
-
-    .board-shell {
-      width: 100% !important;
-      min-width: 0;
-      min-height: 420px;
-      height: 520px !important;
-    }
-
-    .canvas-header {
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 10px;
-    }
-
-    .canvas-header__actions {
+    .settings-window-controls {
       flex-wrap: wrap;
     }
 
