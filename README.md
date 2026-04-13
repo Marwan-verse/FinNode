@@ -215,6 +215,7 @@ Helper scripts:
 - Search: opens quick launcher
 - Clone/Delete nodes from list or context menu
 - Main node is locked and cannot be deleted
+- Startup macro trigger is per-node in Edit Node (`Run Macro On System Start`); main node is always excluded
 
 ## Node Actions
 
@@ -361,6 +362,7 @@ Desktop board geometry is restored during setup at startup.
 - UI toggle in Application settings
 - Default: enabled
 - Backed by `tauri-plugin-autostart` (v1 branch)
+- Startup macro execution is configured in each node's Edit panel via `Run Macro On System Start`
 
 ## System Tray and Global Hotkeys
 

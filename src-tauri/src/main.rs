@@ -135,6 +135,8 @@ struct ProjectNode {
     #[serde(default)]
     macros: Vec<MacroStep>,
     #[serde(default)]
+    run_macro_on_system_start: bool,
+    #[serde(default)]
     collapsed: bool,
     #[serde(default)]
     last_launched: Option<String>,
@@ -453,10 +455,10 @@ fn startup_macro_payload(layout: &AppLayout) -> Option<(Vec<MacroStep>, Option<S
         .workspaces
         .iter()
         .find(|ws| ws.id == layout.active_workspace)?;
-    let startup_node = workspace.nodes.iter().find(|node| node.id == MAIN_NODE_ID)?;
-    if startup_node.macros.is_empty() {
-        return None;
-    }
+    let startup_node = workspace
+        .nodes
+        .iter()
+        .find(|node| node.id != MAIN_NODE_ID && node.run_macro_on_system_start && !node.macros.is_empty())?;
 
     let uploaded_script_path = normalize_optional_owned(startup_node.uploaded_script_path.clone());
     let working_dir = normalize_optional_owned(startup_node.targets.path.clone());
@@ -1139,7 +1141,8 @@ fn default_nodes() -> Vec<ProjectNode> {
             node_type: default_node_type(),
             uploaded_script_path: None,
             uploaded_script_name: None,
-            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+            color: None, group: None, macros: vec![], run_macro_on_system_start: false,
+            collapsed: false, last_launched: None,
         },
         ProjectNode {
             id: "tool-spine".into(), name: "Tool Spine".into(), icon: "◈".into(),
@@ -1153,7 +1156,8 @@ fn default_nodes() -> Vec<ProjectNode> {
             node_type: default_node_type(),
             uploaded_script_path: None,
             uploaded_script_name: None,
-            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+            color: None, group: None, macros: vec![], run_macro_on_system_start: false,
+            collapsed: false, last_launched: None,
         },
         ProjectNode {
             id: "research-fin".into(), name: "Research Fin".into(), icon: "⬡".into(),
@@ -1167,7 +1171,8 @@ fn default_nodes() -> Vec<ProjectNode> {
             node_type: default_node_type(),
             uploaded_script_path: None,
             uploaded_script_name: None,
-            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+            color: None, group: None, macros: vec![], run_macro_on_system_start: false,
+            collapsed: false, last_launched: None,
         },
         ProjectNode {
             id: "signal-drift".into(), name: "Signal Drift".into(), icon: "⟁".into(),
@@ -1180,7 +1185,8 @@ fn default_nodes() -> Vec<ProjectNode> {
             node_type: default_node_type(),
             uploaded_script_path: None,
             uploaded_script_name: None,
-            color: None, group: None, macros: vec![], collapsed: false, last_launched: None,
+            color: None, group: None, macros: vec![], run_macro_on_system_start: false,
+            collapsed: false, last_launched: None,
         },
     ]
 }
@@ -2097,8 +2103,7 @@ fn main() {
             let state = app.state::<AppState>();
             let layout = read_layout(&state.layout_path).unwrap_or_default();
             let startup_enabled = layout.settings.start_on_boot;
-            let run_macro_on_system_start_enabled = layout.settings.run_macro_on_system_start;
-            let system_start_macro = if run_macro_on_system_start_enabled && launched_via_system_start() {
+            let system_start_macro = if launched_via_system_start() {
                 startup_macro_payload(&layout)
             } else {
                 None

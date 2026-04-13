@@ -102,9 +102,8 @@
   const BOARD_OPACITY_MIN = 20;
   const BOARD_OPACITY_MAX = 100;
   let boardOpacity = BOARD_OPACITY_MAX;
-  let appSettings = { start_on_boot: true, run_macro_on_system_start: false };
+  let appSettings = { start_on_boot: true };
   let savingStartOnBoot = false;
-  let savingRunMacroOnSystemStart = false;
   let prefersReducedMotion = false;
   let reducedMotionQuery = null;
   let reducedMotionListener = null;
@@ -125,8 +124,7 @@
     try {
       const settings = await invoke('get_app_settings');
       appSettings = {
-        start_on_boot: Boolean(settings?.start_on_boot ?? true),
-        run_macro_on_system_start: Boolean(settings?.run_macro_on_system_start ?? false)
+        start_on_boot: Boolean(settings?.start_on_boot ?? true)
       };
     } catch (e) {
       updateStatus(`Failed to load app settings: ${String(e)}`);
@@ -145,21 +143,6 @@
       updateStatus(`Startup setting failed: ${String(e)}`);
     } finally {
       savingStartOnBoot = false;
-    }
-  }
-
-  async function updateRunMacroOnSystemStart(enabled) {
-    const previous = appSettings.run_macro_on_system_start;
-    appSettings = {...appSettings, run_macro_on_system_start: enabled};
-    savingRunMacroOnSystemStart = true;
-    try {
-      await invoke('set_run_macro_on_system_start', { enabled });
-      updateStatus(enabled ? 'System-start macro enabled' : 'System-start macro disabled');
-    } catch (e) {
-      appSettings = {...appSettings, run_macro_on_system_start: previous};
-      updateStatus(`System-start macro setting failed: ${String(e)}`);
-    } finally {
-      savingRunMacroOnSystemStart = false;
     }
   }
 
@@ -185,7 +168,8 @@
       name:'', icon:'', description:'',
       path:'', editor:'', browser:'', script:'',
       color:'slate', node_type:'default',
-      uploaded_script_path:'', uploaded_script_name:''
+      uploaded_script_path:'', uploaded_script_name:'',
+      run_macro_on_system_start:false
     };
   }
 
@@ -435,18 +419,21 @@
     return { id:MAIN_NODE_ID, name:MAIN_NODE_NAME, icon:LOGO_ICON, description:'Core entry node', x, y,
              links:[], targets:{path:null,editor:null,browser:null,script:null},
              node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
+             run_macro_on_system_start:false,
              color:'cyan', macros:[], locked:true, last_launched:null };
   }
   function createEmptyNode(x, y) {
     return { id:uid('node'), name:'', icon:'', description:'', x, y,
              links:[], targets:{path:null,editor:null,browser:null,script:null},
              node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
+             run_macro_on_system_start:false,
              color:'slate', macros:[], locked:false, last_launched:null };
   }
   function normalizeNode(raw, index=0) {
     const t = raw?.targets ?? {};
+    const nodeId = typeof raw?.id==='string' && raw.id ? raw.id : uid('node');
     return {
-      id:          typeof raw?.id==='string' && raw.id ? raw.id : uid('node'),
+      id:          nodeId,
       name:        typeof raw?.name==='string' ? raw.name : '',
       icon:        typeof raw?.icon==='string' ? raw.icon : '',
       description: typeof raw?.description==='string' ? raw.description : '',
@@ -458,6 +445,7 @@
       node_type:   normalizeNodeType(raw?.node_type),
       uploaded_script_path: normalizeOptionalString(raw?.uploaded_script_path),
       uploaded_script_name: normalizeOptionalString(raw?.uploaded_script_name),
+      run_macro_on_system_start: nodeId===MAIN_NODE_ID ? false : Boolean(raw?.run_macro_on_system_start),
       color:       NODE_COLORS.includes(raw?.color) ? raw.color : 'slate',
       macros:      normalizeMacroSteps(raw?.macros),
       locked:      Boolean(raw?.locked),
@@ -469,8 +457,8 @@
     const normalized = list.map(node => {
       if (node.id !== MAIN_NODE_ID) return node;
       hasMain = true;
-      const forced = {...node, name:MAIN_NODE_NAME, icon:LOGO_ICON, locked:true};
-      if (forced.name!==node.name||forced.icon!==node.icon||!node.locked) changed=true;
+      const forced = {...node, name:MAIN_NODE_NAME, icon:LOGO_ICON, locked:true, run_macro_on_system_start:false};
+      if (forced.name!==node.name||forced.icon!==node.icon||!node.locked||Boolean(node.run_macro_on_system_start)) changed=true;
       return forced;
     });
     if (hasMain) return {nodes:normalized, changed};
@@ -665,7 +653,7 @@
     const src = nodes.find(n=>n.id===nodeId); if (!src) return;
     const clone = {...src, id:uid('node'), name:src.name?`${src.name} copy`:'Node copy', x:src.x+28, y:src.y+28,
                    links:[...(src.links??[])], targets:{...(src.targets??{})},
-                   macros:normalizeMacroSteps(src.macros), locked:false};
+                   macros:normalizeMacroSteps(src.macros), run_macro_on_system_start:false, locked:false};
     nodes = [...nodes, clone];
     syncSmooth(true); scheduleSave();
     void tick().then(()=>{ clampAllNodesToCanvas(true); queueRender(); });
@@ -936,7 +924,8 @@
                  browser:node.targets?.browser??'', script:node.targets?.script??'', color:node.color??'slate',
                  node_type:normalizeNodeType(node.node_type),
                  uploaded_script_path:node.uploaded_script_path??'',
-                 uploaded_script_name:node.uploaded_script_name??''};
+                 uploaded_script_name:node.uploaded_script_name??'',
+                 run_macro_on_system_start:Boolean(node.run_macro_on_system_start)};
     editSelectedLinks = [...(node.links??[])];
     editMacroSteps = normalizeMacroSteps(node.macros);
     editScriptUpload = null;
@@ -1027,6 +1016,7 @@
     const nodeId=editPopup.nodeId;
     const normalizedIcon = isImageIcon(editDraft.icon) ? editDraft.icon : editDraft.icon.trim();
     const nextType = normalizeNodeType(editDraft.node_type);
+    const runMacroOnSystemStart = Boolean(editDraft.run_macro_on_system_start);
     let uploadedScriptPath = normalizeOptionalString(editDraft.uploaded_script_path);
     let uploadedScriptName = normalizeOptionalString(editDraft.uploaded_script_name);
 
@@ -1052,7 +1042,20 @@
     const normalizedMacros = normalizeMacroSteps(editMacroSteps);
 
     nodes = nodes.map(n=>{
-      if (n.id!==nodeId) return n;
+      if (n.id===MAIN_NODE_ID) {
+        if (Boolean(n.run_macro_on_system_start)) {
+          return {...n, run_macro_on_system_start:false};
+        }
+        return n;
+      }
+
+      if (n.id!==nodeId) {
+        if (runMacroOnSystemStart && Boolean(n.run_macro_on_system_start)) {
+          return {...n, run_macro_on_system_start:false};
+        }
+        return n;
+      }
+
       return {...n,
         name:        editDraft.name.trim() || n.name,
         icon:        normalizedIcon,
@@ -1060,6 +1063,7 @@
         node_type:   nextType,
         uploaded_script_path: uploadedScriptPath,
         uploaded_script_name: uploadedScriptName,
+        run_macro_on_system_start: runMacroOnSystemStart,
         color:       NODE_COLORS.includes(editDraft.color) ? editDraft.color : 'slate',
         links:       [...new Set(editSelectedLinks.filter(id=>id!==nodeId))],
         macros:      normalizedMacros,
@@ -1509,15 +1513,6 @@
                 on:change={e=>updateStartOnBoot(e.currentTarget.checked)}
               />
             </label>
-            <label class="setting-row">
-              <span>Run main node macro on system start</span>
-              <input
-                type="checkbox"
-                checked={appSettings.run_macro_on_system_start}
-                disabled={savingRunMacroOnSystemStart}
-                on:change={e=>updateRunMacroOnSystemStart(e.currentTarget.checked)}
-              />
-            </label>
           </div>
         </section>
 
@@ -1658,6 +1653,18 @@
             <option value="default">Default</option>
             <option value="script">Script</option>
           </select>
+        </label>
+
+        <label class="field field-toggle">
+          <span>Run Macro On System Start</span>
+          <div class="field-toggle-row">
+            <input
+              type="checkbox"
+              checked={Boolean(editDraft.run_macro_on_system_start)}
+              on:change={e=>editDraft={...editDraft, run_macro_on_system_start:e.currentTarget.checked}}
+            />
+              <small>Runs this node macro when FinNode starts from system startup. Main node is never used, and enabling this here turns it off for other nodes.</small>
+          </div>
         </label>
 
         <label class="field">
@@ -2605,6 +2612,27 @@
   .field span {
     font-size:.62rem; font-weight:600; text-transform:uppercase;
     letter-spacing:.1em; color:var(--dim);
+  }
+  .field-toggle-row {
+    display:flex;
+    align-items:flex-start;
+    gap:10px;
+    padding:8px 10px;
+    border-radius:var(--r-sm);
+    border:1px solid var(--border);
+    background:rgba(6,9,15,.58);
+  }
+  .field-toggle-row input[type=checkbox] {
+    width:16px;
+    height:16px;
+    margin-top:1px;
+    flex-shrink:0;
+    accent-color:var(--accent);
+  }
+  .field-toggle-row small {
+    font-size:.7rem;
+    line-height:1.35;
+    color:var(--soft);
   }
   .field input:not([type=file]):not([type=checkbox]),
   .field select,
