@@ -731,6 +731,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
+ "tauri-winres",
  "windows 0.52.0",
 ]
 

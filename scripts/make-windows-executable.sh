@@ -9,6 +9,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+resolve_windows_exe_basename() {
+  local exe_name="${FINNODE_WINDOWS_EXE_NAME:-FinNode}"
+  exe_name="${exe_name%.exe}"
+
+  if [ -z "$exe_name" ]; then
+    echo "FinNode"
+    return
+  fi
+
+  echo "$exe_name"
+}
+
 resolve_windows_target_dir() {
   if [ -n "${FINNODE_WINDOWS_TARGET_DIR:-}" ]; then
     echo "${FINNODE_WINDOWS_TARGET_DIR}"
@@ -148,6 +160,26 @@ ensure_msvc_cross_toolchain_linux() {
   ensure_cargo_xwin
 }
 
+ensure_windows_icon_assets() {
+  local png_path="src-tauri/icons/icon.png"
+  local ico_path="src-tauri/icons/icon.ico"
+
+  if [ -f "$png_path" ] && command -v convert >/dev/null 2>&1; then
+    echo "[FinNode] Syncing Windows icon from icon.png..."
+    convert "$png_path" -define icon:auto-resize=16,24,32,48,64,128,256 "$ico_path"
+  fi
+
+  if [ ! -f "$ico_path" ]; then
+    cat <<'EOF'
+[FinNode] Missing Windows icon file: src-tauri/icons/icon.ico
+[FinNode] Add icon.ico, or install ImageMagick so the script can generate it from icon.png:
+  sudo apt-get update
+  sudo apt-get install -y imagemagick
+EOF
+    exit 1
+  fi
+}
+
 # Load Cargo path first when rustup is already installed.
 if [ -s "$HOME/.cargo/env" ]; then
   # shellcheck disable=SC1091
@@ -215,10 +247,7 @@ npm install --include=dev
 echo "[FinNode] Building web assets..."
 npm run build:web
 
-if [ -f src-tauri/icons/icon.png ] && command -v convert >/dev/null 2>&1; then
-  echo "[FinNode] Syncing Windows icon from icon.png..."
-  convert src-tauri/icons/icon.png -define icon:auto-resize=16,24,32,48,64,128,256 src-tauri/icons/icon.ico
-fi
+ensure_windows_icon_assets
 
 echo "[FinNode] Web assets built. Starting Rust Windows compile (this can take several minutes on first run)..."
 
@@ -262,9 +291,21 @@ EOF
 fi
 
 WINDOWS_EXPORT_DIR="${FINNODE_WINDOWS_EXPORT_DIR:-$(pwd)/artifacts/windows}"
+WINDOWS_EXE_BASENAME="$(resolve_windows_exe_basename)"
+WINDOWS_EXE_FILENAME="$WINDOWS_EXE_BASENAME.exe"
 mkdir -p "$WINDOWS_EXPORT_DIR"
 
-cp -f "$WINDOWS_EXE_PATH" "$WINDOWS_EXPORT_DIR/finnode.exe"
+# Remove old exports first so Windows sees a fresh file write and icon metadata.
+rm -f "$WINDOWS_EXPORT_DIR/$WINDOWS_EXE_FILENAME"
+# Also clear historical default names if they differ from the chosen output name.
+if [ "$WINDOWS_EXE_FILENAME" != "finnode.exe" ]; then
+  rm -f "$WINDOWS_EXPORT_DIR/finnode.exe"
+fi
+if [ "$WINDOWS_EXE_FILENAME" != "FinNode.exe" ]; then
+  rm -f "$WINDOWS_EXPORT_DIR/FinNode.exe"
+fi
+
+cp -f "$WINDOWS_EXE_PATH" "$WINDOWS_EXPORT_DIR/$WINDOWS_EXE_FILENAME"
 if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]] && [ -f "$WINDOWS_DLL_PATH" ]; then
   cp -f "$WINDOWS_DLL_PATH" "$WINDOWS_EXPORT_DIR/WebView2Loader.dll"
 fi
@@ -274,7 +315,7 @@ fi
 
 echo "[FinNode] Internal build output: $WINDOWS_EXE_PATH"
 echo "[FinNode] Final exported artifacts: $WINDOWS_EXPORT_DIR"
-echo "[FinNode] USE THIS FILE: $WINDOWS_EXPORT_DIR/finnode.exe"
+echo "[FinNode] USE THIS FILE: $WINDOWS_EXPORT_DIR/$WINDOWS_EXE_FILENAME"
 if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc ]]; then
   echo "[FinNode] Target: $WINDOWS_TARGET_TRIPLE (WebView2 loader is statically linked)"
 fi
@@ -288,7 +329,7 @@ if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]]; then
 fi
 
 if command -v wslpath >/dev/null 2>&1; then
-  export_exe_windows_path="$(wslpath -w "$WINDOWS_EXPORT_DIR/finnode.exe" 2>/dev/null || true)"
+  export_exe_windows_path="$(wslpath -w "$WINDOWS_EXPORT_DIR/$WINDOWS_EXE_FILENAME" 2>/dev/null || true)"
   if [ -n "$export_exe_windows_path" ]; then
     echo "[FinNode] Windows path: $export_exe_windows_path"
   fi

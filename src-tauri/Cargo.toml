@@ -5,6 +5,7 @@ edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "1", features = [] }
+tauri-winres = "0.1"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
