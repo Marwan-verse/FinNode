@@ -68,6 +68,9 @@
   let dragOffset = { x: 0, y: 0 };
   let dragStart  = { x: 0, y: 0 };
   let dragMoved  = false;
+  let isPanning  = false;
+  let panStartPointer = { x: 0, y: 0 };
+  let panStartOffset  = { x: 0, y: 0 };
   let pendingPointer = null;
   let dragFrame      = null;
 
@@ -91,6 +94,7 @@
   let launcherResults = [];
 
   let zoomLevel = 1.0;
+  let boardPan = { x: 0, y: 0 };
   const ZOOM_MIN  = 0.3;
   const ZOOM_MAX  = 3.0;
   const ZOOM_STEP = 0.12;
@@ -614,15 +618,21 @@
     const w  = el ? el.offsetWidth  : NODE_SIZE;
     const h  = el ? el.offsetHeight : NODE_SIZE;
 
-    // When zoomed out, allow a larger logical workspace so nodes can be
-    // positioned beyond the base canvas bounds and still remain reachable.
+    // When zoomed out, expand logical bounds and add travel padding so
+    // nodes can move beyond the original 100% viewport area.
     const zoomForBounds = zoomLevel < 1 ? zoomLevel : 1;
     const logicalWidth = canvasEl.offsetWidth / zoomForBounds;
     const logicalHeight = canvasEl.offsetHeight / zoomForBounds;
+    const extraTravelX = zoomLevel < 1 ? canvasEl.offsetWidth * ((1 / zoomLevel) - 1) : 0;
+    const extraTravelY = zoomLevel < 1 ? canvasEl.offsetHeight * ((1 / zoomLevel) - 1) : 0;
+    const minX = -extraTravelX;
+    const minY = -extraTravelY;
+    const maxX = Math.max(minX, logicalWidth + extraTravelX - w);
+    const maxY = Math.max(minY, logicalHeight + extraTravelY - h);
 
     return {
-      x: clamp(x, 0, Math.max(0, logicalWidth - w)),
-      y: clamp(y, 0, Math.max(0, logicalHeight - h))
+      x: clamp(x, minX, maxX),
+      y: clamp(y, minY, maxY)
     };
   }
   function clampAllNodesToCanvas(save=false) {
@@ -654,6 +664,14 @@
     event.preventDefault();
   }
   function onPointerMove(event) {
+    if (isPanning) {
+      const dx = event.clientX - panStartPointer.x;
+      const dy = event.clientY - panStartPointer.y;
+      boardPan = {x: panStartOffset.x + dx, y: panStartOffset.y + dy};
+      queueRender();
+      return;
+    }
+
     if (!draggingId||!nodeLayer) return;
     if (!dragMoved) dragMoved = Math.abs(event.clientX-dragStart.x)>4||Math.abs(event.clientY-dragStart.y)>4;
     pendingPointer = {x:event.clientX, y:event.clientY};
@@ -671,7 +689,26 @@
       queueRender();
     });
   }
+
+  function beginCanvasPan(event) {
+    if (event.button!==1) return;
+    if (event.target instanceof Element && event.target.closest('button,input,textarea,select,label,a')) return;
+    isPanning = true;
+    panStartPointer = {x:event.clientX, y:event.clientY};
+    panStartOffset  = {x:boardPan.x, y:boardPan.y};
+    event.preventDefault();
+  }
+
+  function preventMiddleAuxClick(event) {
+    if (event.button===1) event.preventDefault();
+  }
+
   function onPointerUp() {
+    if (isPanning) {
+      isPanning = false;
+      return;
+    }
+
     if (!draggingId) return;
     const releasedId=draggingId;
     if (dragFrame!==null) { cancelAnimationFrame(dragFrame); dragFrame=null; }
@@ -1139,7 +1176,14 @@
         </div>
 
         <!-- Canvas: bind canvasEl here (outer, unscaled logical container) -->
-        <div class="canvas" bind:this={canvasEl} on:wheel|passive={onWheelZoom}>
+        <div
+          class="canvas"
+          class:canvas--panning={isPanning}
+          bind:this={canvasEl}
+          on:pointerdown={beginCanvasPan}
+          on:auxclick={preventMiddleAuxClick}
+          on:wheel|passive={onWheelZoom}
+        >
 
           <!-- Decorative background affected by opacity slider -->
           <div class="canvas-background" style="--board-bg-opacity:{boardOpacity / 100}" aria-hidden="true">
@@ -1150,7 +1194,7 @@
           <!-- Zoom root: both SVG links + nodes scale together -->
           <div class="zoom-root"
                bind:this={nodeLayer}
-               style="transform:scale({zoomLevel});transform-origin:0 0;position:absolute;inset:0;width:100%;height:100%;">
+            style="transform:translate({boardPan.x}px,{boardPan.y}px) scale({zoomLevel});transform-origin:0 0;position:absolute;inset:0;width:100%;height:100%;">
 
             <!-- SVG links: coordinates match node renderX/Y (logical space) -->
             <svg class="links" {viewBox} style="position:absolute;inset:0;width:100%;height:100%;overflow:visible;">
@@ -1288,7 +1332,7 @@
           <span class="zoom-pct">{Math.round(zoomLevel*100)}%</span>
           <button class="zoom-btn" on:click={zoomIn}  title="Zoom in (Ctrl+scroll)"  disabled={zoomLevel>=ZOOM_MAX}>+</button>
           <div class="zoom-divider"></div>
-          <button class="zoom-btn" on:click={()=>{ zoomLevel=1; queueRender(); }} title="Reset zoom">⊙</button>
+          <button class="zoom-btn" on:click={()=>{ zoomLevel=1; boardPan={x:0,y:0}; queueRender(); }} title="Reset zoom and pan">⊙</button>
         </div>
 
         <!-- Status strip -->
@@ -2003,6 +2047,10 @@
     position:relative; flex:1; min-height:0;
     overflow:hidden;
     background:transparent;
+  }
+  .canvas--panning,
+  .canvas--panning * {
+    cursor:grabbing !important;
   }
 
   .canvas-background {
