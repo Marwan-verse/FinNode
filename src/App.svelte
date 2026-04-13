@@ -613,9 +613,16 @@
     const el = nodeElements.get(node.id);
     const w  = el ? el.offsetWidth  : NODE_SIZE;
     const h  = el ? el.offsetHeight : NODE_SIZE;
+
+    // When zoomed out, allow a larger logical workspace so nodes can be
+    // positioned beyond the base canvas bounds and still remain reachable.
+    const zoomForBounds = zoomLevel < 1 ? zoomLevel : 1;
+    const logicalWidth = canvasEl.offsetWidth / zoomForBounds;
+    const logicalHeight = canvasEl.offsetHeight / zoomForBounds;
+
     return {
-      x: clamp(x, 0, Math.max(0, canvasEl.offsetWidth  - w)),
-      y: clamp(y, 0, Math.max(0, canvasEl.offsetHeight - h))
+      x: clamp(x, 0, Math.max(0, logicalWidth - w)),
+      y: clamp(y, 0, Math.max(0, logicalHeight - h))
     };
   }
   function clampAllNodesToCanvas(save=false) {

@@ -1,0 +1,568 @@
+FINNODE - COMPLETE HOW-TO GUIDE
+================================
+
+This file is a practical user guide for FinNode. It explains how to use
+the app day-to-day, including all major features in the current build.
+
+
+1) WHAT FINNODE IS
+------------------
+
+FinNode is a desktop project launcher and automation board. It has two
+windows that work together:
+
+- Main window (Settings):
+	You configure workspaces, nodes, startup behavior, and node macros.
+
+- Desktop window (Node Board):
+	You interact with floating nodes, links, quick actions, zoom, and opacity.
+
+Use FinNode to open project folders, run scripts, launch apps, open URLs,
+type text into active apps, and send keyboard shortcut sequences.
+
+
+2) FIRST RUN CHECKLIST
+----------------------
+
+1. Launch FinNode.
+2. Confirm both windows appear:
+	 - Settings window
+	 - Node board window
+3. In Settings, check the "Start app when the PC starts" toggle.
+4. Resize and move the node board to your preferred position.
+5. Close and reopen FinNode to verify position/size persistence.
+
+
+3) UNDERSTANDING THE UI
+-----------------------
+
+SETTINGS WINDOW SECTIONS
+
+- Application
+	- Start app when PC starts (enabled by default)
+
+- Workspaces
+	- Switch workspace
+	- Create workspace
+	- Delete workspace
+
+- Nodes
+	- Add node
+	- Auto layout
+	- Search launcher
+	- Node list with quick actions
+
+- Status
+	- Current status message
+	- Recent activity log
+
+
+NODE BOARD WINDOW AREAS
+
+- Top title bar
+	- Add node
+	- Auto layout
+	- Open search launcher
+
+- Canvas
+	- Draggable nodes
+	- Curved links between nodes
+
+- Left control pill
+	- Opacity slider and value
+
+- Bottom strip
+	- Status text
+	- Node count
+
+- Bottom-right zoom controls
+	- Zoom out, zoom in, reset
+
+
+4) CORE WORKFLOW (RECOMMENDED)
+------------------------------
+
+Use this workflow to set up a reliable daily board:
+
+1. Create a workspace per context:
+	 - Example: "Client A", "Backend", "Personal"
+
+2. Add nodes for each project/tool:
+	 - One node per repo or repeated action
+
+3. Edit each node and set targets:
+	 - Path
+	 - Editor command
+	 - Browser URL
+	 - Script command
+
+4. Assign node colors and icons for quick recognition.
+
+5. Add macro steps for multi-action flows.
+
+6. Link related nodes to visually map dependencies.
+
+7. Position the node board where you want it, then restart once to confirm
+	 geometry persistence.
+
+
+5) WORKSPACES - HOW TO USE
+--------------------------
+
+Create workspace
+
+1. In Settings -> Workspaces, type a name.
+2. Click +.
+
+Switch workspace
+
+1. Use the workspace dropdown.
+2. Select desired workspace.
+
+Delete workspace
+
+1. Select workspace.
+2. Click Delete workspace.
+3. Note: You cannot delete the last remaining workspace.
+
+
+6) NODES - CREATE, EDIT, ORGANIZE
+---------------------------------
+
+Add a node
+
+1. Click + Add in Settings or + in node board title bar.
+
+Open node editor
+
+- From Settings node list: click edit icon.
+- From node board: use node edit button or context menu.
+
+Node fields explained
+
+- Name
+	Display label.
+
+- Icon (character)
+	Letter/symbol shown in node.
+
+- Upload icon image
+	Optional image icon for node.
+
+- Description
+	Optional text shown when expanded.
+
+- Node type
+	- default
+	- script
+
+- Folder path
+	Path to project folder.
+
+- Editor command
+	Command/path used for open editor action.
+
+- Browser URL
+	URL used for open browser action.
+
+- Script command
+	Command used for run script action.
+
+- Upload script file (script node)
+	Uploads script file into FinNode script storage and lets macro/action use it.
+
+- Node color
+	Visual organization.
+
+- Connected nodes
+	Controls outgoing links from this node.
+
+Save changes
+
+1. Click Save changes.
+2. FinNode persists node data to config.
+
+
+7) NODE INTERACTION ON THE BOARD
+--------------------------------
+
+Click behavior
+
+- Single click node:
+	Expands action bubble for that node.
+
+- Double click script-capable node:
+	Runs script action (if configured).
+
+- Right click node:
+	Opens context menu with launch + edit + link operations.
+
+Drag behavior
+
+- Drag nodes to reposition.
+- Node positions persist in workspace data.
+
+Context menu actions
+
+- Open path
+- Open editor
+- Open browser
+- Run script
+- Run macro
+- Edit node
+- Add connected
+- Connect nearest
+- Clear links
+- Clone
+- Delete
+
+
+8) MULTI-SELECT AND BATCH ACTIONS
+---------------------------------
+
+Selection
+
+- Ctrl/Cmd + click toggles node selection.
+
+Batch bar options (when selection exists)
+
+- Open all
+- Delete selected
+- Clear selection
+
+
+9) SEARCH / QUICK LAUNCHER
+--------------------------
+
+Open launcher
+
+- Click Search button
+- Ctrl/Cmd + K
+- Alt + Space
+
+Use launcher
+
+1. Type node name.
+2. Use arrow keys.
+3. Press Enter to run node open-path.
+
+
+10) MACROS - COMPLETE GUIDE
+---------------------------
+
+What macros do
+
+- Macros run a sequence of steps in order.
+- Use them to automate repeated launch flows.
+
+How to add macro steps
+
+1. Open node editor.
+2. Go to Macros section.
+3. Click + Add macro step.
+4. Choose action and set value.
+5. Add more steps as needed.
+6. Save node.
+
+Macro action reference
+
+1. run-script
+	 Runs command string (or script path if value resolves to file).
+
+2. run-uploaded-script
+	 Runs previously uploaded script file for the node.
+
+3. type-text
+	 Types text into currently active external window.
+
+4. keyboard-shortcut
+	 Sends key chord(s) into currently active external window.
+	 Supports multi-switch sequences.
+
+5. open-path
+	 Opens path with OS default opener.
+
+6. open-editor
+	 Opens editor target/path.
+
+7. open-browser
+	 Opens URL in browser.
+
+8. open-application
+	 Launches app by command/app name/desktop entry.
+
+9. delay
+	 Waits milliseconds before next step.
+
+
+11) KEYBOARD SHORTCUT MACRO (RECORDER)
+--------------------------------------
+
+This is the most advanced macro type.
+
+Record a shortcut sequence
+
+1. Set action to keyboard-shortcut.
+2. Click Record.
+3. Press first key combo (example: Ctrl+K).
+4. Press second combo if needed (example: Ctrl+C).
+5. Click Stop or press Esc.
+6. Save node.
+
+How sequence format works
+
+- Single chord:
+	Ctrl+Shift+P
+
+- Multi-switch sequence:
+	Ctrl+K, Ctrl+C
+
+Display behavior
+
+- FinNode shows keys with visible + signs in preview for readability.
+
+Tips
+
+- Include a non-modifier key in each chord.
+- Keep sequences short and predictable.
+
+
+12) TYPE-TEXT MACRO - BEST RESULTS
+----------------------------------
+
+Goal
+
+- Type directly into another application window.
+
+How to get reliable typing
+
+1. Start macro from node board or settings.
+2. Make sure target app is focused before macro run.
+3. Keep FinNode visible state in mind:
+	 FinNode now does focus handoff before input actions.
+
+Linux tools
+
+- type-text uses:
+	- xdotool first
+	- wtype fallback
+
+Install if missing:
+
+	sudo apt-get install -y xdotool wtype
+
+
+13) OPEN-APPLICATION ACTION
+---------------------------
+
+What to put in value
+
+- App command name:
+	obsidian
+
+- App desktop id (Linux):
+	obsidian.desktop
+
+- Command with args:
+	code --new-window
+
+Platform notes
+
+- Linux: tries gtk-launch then shell fallback.
+- macOS: uses open -a style path.
+- Windows: uses start command path.
+
+If app does not open
+
+1. Try full command.
+2. Try desktop id on Linux.
+3. Verify app command exists in PATH.
+
+
+14) STARTUP AND PERSISTENCE
+---------------------------
+
+Start on boot
+
+- Controlled by Application toggle in Settings.
+- Default is enabled.
+
+What is persisted
+
+- Workspaces and nodes
+- Node targets and macros
+- Command history cache
+- Desktop board size and position
+- Startup setting
+
+When desktop board geometry is saved
+
+- On move
+- On resize
+- On desktop close/hide
+- On full app exit
+
+When geometry is restored
+
+- On app startup
+- Includes autostart boot sessions
+
+
+15) SYSTEM TRAY AND HOTKEYS
+---------------------------
+
+Tray menu items
+
+- Open Settings
+- Toggle Stealth
+- Show/Hide Desktop Nodes
+- Toggle Background Click-Through
+- Exit
+
+Global hotkeys
+
+- Alt+S = toggle stealth
+- Alt+I = toggle click-through
+- Alt+Space = toggle quick launcher
+
+
+16) WINDOW CONTROLS BEHAVIOR
+----------------------------
+
+Settings window minimize button
+
+- Hides settings window (does not fully kill app).
+
+Settings window close button
+
+- Fully exits app process.
+
+Desktop board window
+
+- Resizable
+- Draggable
+- Geometry persists and is restored
+
+
+17) VISUAL CONTROLS
+-------------------
+
+Zoom
+
+- Use +/- controls in bottom-right of node board.
+- Reset with center button.
+
+Opacity
+
+- Use opacity slider on left side of node board.
+- Value shown as percentage.
+
+
+18) WHERE DATA IS STORED
+------------------------
+
+Main config
+
+- FinNode/config.json in OS config directory.
+
+Uploaded scripts
+
+- FinNode/scripts/
+
+Single-instance lock file
+
+- FinNode/app.lock
+
+
+19) BUILD/RUN COMMANDS (FOR POWER USERS)
+----------------------------------------
+
+- npm run dev
+	Web dev server only.
+
+- npm run dev:desktop
+	Desktop app dev mode.
+
+- npm run build:web
+	Build frontend assets.
+
+- npm run build:exe
+	Build desktop bundle.
+
+- npm run make
+	Alias for build:exe.
+
+- npm run make:windows
+	Build Windows executable from Linux helper flow.
+
+
+20) TROUBLESHOOTING
+-------------------
+
+Problem: Typing macro does not type in target app
+
+1. Focus target app right before macro.
+2. Install xdotool/wtype on Linux.
+3. Avoid secure input fields that block synthetic typing.
+
+Problem: Keyboard-shortcut macro does not trigger expected behavior
+
+1. Re-record sequence.
+2. Ensure each chord includes a non-modifier key.
+3. Add short delay steps between complex sequences.
+
+Problem: Open-application does nothing
+
+1. Try command name and full command variants.
+2. On Linux, try app.desktop id.
+3. Check PATH and app install.
+
+Problem: Board position/size resets after restart
+
+1. Move/resize board, then fully exit app once.
+2. Reopen and verify restore.
+3. If autostart path differs by user session, verify permissions in config dir.
+
+Problem: App says already running
+
+1. Confirm no FinNode process exists.
+2. Remove stale lock file only when app is definitely closed.
+
+
+21) PRACTICAL EXAMPLES
+----------------------
+
+Example A: Start coding session macro
+
+1. open-path -> /home/user/work/myrepo
+2. open-editor -> code /home/user/work/myrepo
+3. open-browser -> http://localhost:5173
+4. delay -> 800
+5. keyboard-shortcut -> Ctrl+K, Ctrl+C
+
+Example B: Daily notes workflow
+
+1. open-application -> obsidian
+2. delay -> 700
+3. keyboard-shortcut -> Ctrl+N
+4. type-text -> Daily notes
+
+Example C: Backend service startup
+
+1. open-path -> /home/user/work/api
+2. run-script -> npm run dev
+3. delay -> 1200
+4. open-browser -> http://localhost:3000
+
+
+22) GOOD PRACTICES
+------------------
+
+- Keep one workspace per context.
+- Give nodes clear names and distinct colors.
+- Prefer short, deterministic macros.
+- Add delay steps when launching heavy apps before input steps.
+- Test macros one step at a time, then combine.
+
+
+END OF GUIDE
