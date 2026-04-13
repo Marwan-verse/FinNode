@@ -383,7 +383,11 @@ fn run_node_macro(
                         let _ = run_script(script, working_dir.as_deref());
                     }
                 }
-                "open-application" => { let _ = run_script(&step.value, None); }
+                "open-application" => {
+                    if let Err(err) = open_application(&step.value) {
+                        eprintln!("open-application failed: {err}");
+                    }
+                }
                 "open-editor" => { let _ = launch_code(&step.value); }
                 "type-text" => { let _ = type_text(&step.value); }
                 "keyboard-shortcut" => { let _ = send_keyboard_shortcut(&step.value); }
@@ -1247,6 +1251,33 @@ fn script_file_path(script: &str, cwd: Option<&str>) -> Option<PathBuf> {
     None
 }
 
+fn apply_command_path_overrides(cmd: &mut Command) {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut segments = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|entry| !entry.trim().is_empty())
+            .map(|entry| entry.to_string())
+            .collect::<Vec<_>>();
+
+        if let Ok(home) = std::env::var("HOME") {
+            let local_bin = format!("{home}/.local/bin");
+            if !segments.iter().any(|entry| entry == &local_bin) {
+                segments.insert(0, local_bin);
+            }
+        }
+
+        for extra in ["/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"] {
+            if !segments.iter().any(|entry| entry == extra) {
+                segments.push(extra.to_string());
+            }
+        }
+
+        cmd.env("PATH", segments.join(":"));
+    }
+}
+
 fn run_shell_command(command: &str, cwd: Option<&str>) -> Result<(), String> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -1257,10 +1288,65 @@ fn run_shell_command(command: &str, cwd: Option<&str>) -> Result<(), String> {
         c.args(["-lc", command]);
         c
     };
+
+    apply_command_path_overrides(&mut cmd);
+
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn open_application(value: &str) -> Result<(), String> {
+    let target = value.trim();
+    if target.is_empty() {
+        return Err("application command is empty".into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop_ids = if target.ends_with(".desktop") {
+            vec![target.to_string()]
+        } else {
+            vec![target.to_string(), format!("{target}.desktop")]
+        };
+
+        for desktop_id in desktop_ids {
+            let status = Command::new("gtk-launch").arg(&desktop_id).status();
+            match status {
+                Ok(exit) if exit.success() => return Ok(()),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open").arg("-a").arg(target).status();
+        match status {
+            Ok(exit) if exit.success() => return Ok(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .status();
+        match status {
+            Ok(exit) if exit.success() => return Ok(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    run_shell_command(target, None)
 }
 
 fn run_script_file(path: &Path, cwd: Option<&str>) -> Result<(), String> {
