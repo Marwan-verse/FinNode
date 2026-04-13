@@ -3,7 +3,7 @@
 FinNode is a desktop project navigator built with Tauri (Rust backend) and Svelte (frontend).
 It gives you a draggable node board window and a separate settings/control window so you can launch project actions, run macros, type text, and send keyboard shortcut sequences quickly.
 
-This README is intentionally detailed and maps directly to the current codebase.
+[Website](https://www.marrr.me/FinNode)
 
 ## Table of Contents
 
