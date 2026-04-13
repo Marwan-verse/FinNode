@@ -17,8 +17,6 @@ Use one of these methods:
 
 1. GitHub Security Advisories:
    - https://github.com/Marwan-verse/FinNode/security/advisories/new
-2. Private email (if maintained by your team):
-   - `security@finnode.local` (replace with your real address)
 
 When reporting, include:
 
