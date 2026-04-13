@@ -335,12 +335,20 @@ fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) ->
 
 #[tauri::command]
 fn run_node_macro(
+    app: AppHandle,
     steps: Vec<MacroStep>,
     uploaded_script_path: Option<String>,
     working_dir: Option<String>,
 ) -> Result<(), String> {
     let uploaded_script_path = normalize_optional_owned(uploaded_script_path);
     let working_dir = normalize_optional_owned(working_dir);
+
+    if steps
+        .iter()
+        .any(|step| step.action == "type-text" || step.action == "keyboard-shortcut")
+    {
+        release_macro_input_focus(&app);
+    }
 
     if steps.iter().any(|step| step.action == "run-uploaded-script") && uploaded_script_path.is_none() {
         return Err("No uploaded script configured for this node".into());
@@ -359,6 +367,7 @@ fn run_node_macro(
                 "open-application" => { let _ = run_script(&step.value, None); }
                 "open-editor" => { let _ = launch_code(&step.value); }
                 "type-text" => { let _ = type_text(&step.value); }
+                "keyboard-shortcut" => { let _ = send_keyboard_shortcut(&step.value); }
                 "delay" => {
                     let ms: u64 = step.value.parse().unwrap_or(1000);
                     thread::sleep(std::time::Duration::from_millis(ms));
@@ -597,7 +606,10 @@ fn set_window_bottom(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn exit_app(app: AppHandle) {
+fn exit_app(app: AppHandle, state: State<'_, AppState>) {
+    if let Some(desktop) = app.get_window("desktop") {
+        let _ = persist_desktop_window_state(&desktop, state.inner());
+    }
     app.exit(0);
 }
 
@@ -1255,6 +1267,366 @@ fn run_script_file(path: &Path, cwd: Option<&str>) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+fn release_macro_input_focus(app: &AppHandle) {
+    if let Some(main) = app.get_window("main") {
+        let _ = main.hide();
+    }
+    thread::sleep(std::time::Duration::from_millis(130));
+}
+
+fn shortcut_modifier_rank(token: &str) -> Option<usize> {
+    match token {
+        "Ctrl" => Some(0),
+        "Alt" => Some(1),
+        "Shift" => Some(2),
+        "Meta" => Some(3),
+        _ => None,
+    }
+}
+
+fn normalize_shortcut_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    let lower = token.to_ascii_lowercase();
+    let normalized = match lower.as_str() {
+        "ctrl" | "control" => "Ctrl".to_string(),
+        "alt" | "option" => "Alt".to_string(),
+        "shift" => "Shift".to_string(),
+        "meta" | "cmd" | "command" | "win" | "super" | "os" => "Meta".to_string(),
+        "esc" | "escape" => "Esc".to_string(),
+        "enter" | "return" => "Enter".to_string(),
+        "space" | "spacebar" => "Space".to_string(),
+        "tab" => "Tab".to_string(),
+        "delete" | "del" => "Delete".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "up" | "arrowup" => "Up".to_string(),
+        "down" | "arrowdown" => "Down".to_string(),
+        "left" | "arrowleft" => "Left".to_string(),
+        "right" | "arrowright" => "Right".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        "pageup" => "PageUp".to_string(),
+        "pagedown" => "PageDown".to_string(),
+        "insert" => "Insert".to_string(),
+        _ => {
+            if token.len() == 1 {
+                token.to_ascii_uppercase()
+            } else if token.starts_with('f')
+                && token[1..].chars().all(|ch| ch.is_ascii_digit())
+                && token.len() <= 3
+            {
+                token.to_ascii_uppercase()
+            } else {
+                let mut chars = token.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut out = first.to_ascii_uppercase().to_string();
+                        out.push_str(&chars.as_str().to_ascii_lowercase());
+                        out
+                    }
+                    None => return None,
+                }
+            }
+        }
+    };
+
+    Some(normalized)
+}
+
+fn parse_shortcut_sequence(value: &str) -> Vec<Vec<String>> {
+    let mut sequence = Vec::new();
+
+    for raw_chord in value.split(',') {
+        let mut modifiers = Vec::<String>::new();
+        let mut keys = Vec::<String>::new();
+
+        for raw_token in raw_chord.split('+') {
+            let Some(token) = normalize_shortcut_token(raw_token) else { continue };
+
+            if shortcut_modifier_rank(&token).is_some() {
+                if !modifiers.iter().any(|existing| existing == &token) {
+                    modifiers.push(token);
+                }
+            } else if !keys.iter().any(|existing| existing == &token) {
+                keys.push(token);
+            }
+        }
+
+        if keys.is_empty() {
+            continue;
+        }
+
+        modifiers.sort_by_key(|token| shortcut_modifier_rank(token).unwrap_or(usize::MAX));
+        modifiers.extend(keys);
+        sequence.push(modifiers);
+    }
+
+    sequence
+}
+
+#[cfg(target_os = "linux")]
+fn linux_shortcut_key_name(token: &str) -> String {
+    match token {
+        "Ctrl" => "ctrl".into(),
+        "Alt" => "alt".into(),
+        "Shift" => "shift".into(),
+        "Meta" => "super".into(),
+        "Esc" => "Escape".into(),
+        "Enter" => "Return".into(),
+        "Space" => "space".into(),
+        "Tab" => "Tab".into(),
+        "Delete" => "Delete".into(),
+        "Backspace" => "BackSpace".into(),
+        "Up" => "Up".into(),
+        "Down" => "Down".into(),
+        "Left" => "Left".into(),
+        "Right" => "Right".into(),
+        "Home" => "Home".into(),
+        "End" => "End".into(),
+        "PageUp" => "Page_Up".into(),
+        "PageDown" => "Page_Down".into(),
+        "Insert" => "Insert".into(),
+        _ => {
+            if token.len() == 1 {
+                token.to_ascii_lowercase()
+            } else {
+                token.to_string()
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_shortcut_chord(chord: &[String]) -> Result<(), String> {
+    let combo = chord
+        .iter()
+        .map(|token| linux_shortcut_key_name(token))
+        .collect::<Vec<_>>()
+        .join("+");
+
+    let status = Command::new("xdotool")
+        .args(["key", "--clearmodifiers", &combo])
+        .status();
+
+    match status {
+        Ok(exit) if exit.success() => Ok(()),
+        Ok(_) => Err(format!("xdotool failed to send shortcut: {combo}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err("Keyboard shortcuts require xdotool on Linux".into())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shortcut_key_expr(token: &str) -> Result<String, String> {
+    let upper = token.to_ascii_uppercase();
+    let expr = match upper.as_str() {
+        "ESC" => "{ESC}".to_string(),
+        "ENTER" => "{ENTER}".to_string(),
+        "TAB" => "{TAB}".to_string(),
+        "SPACE" => " ".to_string(),
+        "DELETE" => "{DELETE}".to_string(),
+        "BACKSPACE" => "{BACKSPACE}".to_string(),
+        "UP" => "{UP}".to_string(),
+        "DOWN" => "{DOWN}".to_string(),
+        "LEFT" => "{LEFT}".to_string(),
+        "RIGHT" => "{RIGHT}".to_string(),
+        "HOME" => "{HOME}".to_string(),
+        "END" => "{END}".to_string(),
+        "PAGEUP" => "{PGUP}".to_string(),
+        "PAGEDOWN" => "{PGDN}".to_string(),
+        "INSERT" => "{INSERT}".to_string(),
+        _ => {
+            if upper.starts_with('F') && upper[1..].chars().all(|ch| ch.is_ascii_digit()) {
+                format!("{{{upper}}}")
+            } else if upper.len() == 1 && upper.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+                upper
+            } else {
+                return Err(format!("Unsupported key for Windows shortcut: {token}"));
+            }
+        }
+    };
+    Ok(expr)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_sendkeys_chord(chord: &[String]) -> Result<String, String> {
+    let mut modifiers = String::new();
+    let mut keys = Vec::<&str>::new();
+
+    for token in chord {
+        match token.as_str() {
+            "Ctrl" => modifiers.push('^'),
+            "Alt" => modifiers.push('%'),
+            "Shift" => modifiers.push('+'),
+            "Meta" => return Err("Meta shortcuts are not supported on Windows SendKeys".into()),
+            _ => keys.push(token),
+        }
+    }
+
+    if keys.is_empty() {
+        return Err("Shortcut chord is missing a primary key".into());
+    }
+
+    let mut key_expr = String::new();
+    if keys.len() > 1 {
+        key_expr.push('(');
+    }
+    for key in keys {
+        key_expr.push_str(&windows_shortcut_key_expr(key)?);
+    }
+    if key_expr.starts_with('(') {
+        key_expr.push(')');
+    }
+
+    Ok(format!("{modifiers}{key_expr}"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_shortcut_chord(chord: &[String]) -> Result<(), String> {
+    let send_keys = windows_sendkeys_chord(chord)?;
+    let escaped = send_keys.replace('`', "``").replace('"', "`\"");
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\"{escaped}\")"
+    );
+
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("PowerShell SendKeys failed to send keyboard shortcut".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_modifier_name(token: &str) -> Option<&'static str> {
+    match token {
+        "Ctrl" => Some("control down"),
+        "Alt" => Some("option down"),
+        "Shift" => Some("shift down"),
+        "Meta" => Some("command down"),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_key_code(token: &str) -> Option<u8> {
+    match token {
+        "Enter" => Some(36),
+        "Tab" => Some(48),
+        "Esc" => Some(53),
+        "Backspace" => Some(51),
+        "Delete" => Some(117),
+        "Up" => Some(126),
+        "Down" => Some(125),
+        "Left" => Some(123),
+        "Right" => Some(124),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keystroke_text(token: &str) -> Option<String> {
+    if token == "Space" {
+        return Some(" ".into());
+    }
+    if token.len() == 1 {
+        return Some(token.to_ascii_lowercase());
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_shortcut_chord(chord: &[String]) -> Result<(), String> {
+    let mut modifiers = Vec::<&str>::new();
+    let mut keys = Vec::<&str>::new();
+
+    for token in chord {
+        if let Some(modifier) = macos_modifier_name(token) {
+            modifiers.push(modifier);
+        } else {
+            keys.push(token);
+        }
+    }
+
+    let key = keys
+        .first()
+        .copied()
+        .ok_or_else(|| "Shortcut chord is missing a primary key".to_string())?;
+
+    let using_clause = if modifiers.is_empty() {
+        String::new()
+    } else {
+        format!(" using {{{}}}", modifiers.join(", "))
+    };
+
+    let script = if let Some(code) = macos_key_code(key) {
+        format!("tell application \"System Events\" to key code {code}{using_clause}")
+    } else if let Some(text) = macos_keystroke_text(key) {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("tell application \"System Events\" to keystroke \"{escaped}\"{using_clause}")
+    } else {
+        return Err(format!("Unsupported key for macOS shortcut: {key}"));
+    };
+
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("osascript failed to send keyboard shortcut".into())
+    }
+}
+
+fn send_keyboard_shortcut(value: &str) -> Result<(), String> {
+    let sequence = parse_shortcut_sequence(value);
+    if sequence.is_empty() {
+        return Err("keyboard shortcut is empty".into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for chord in &sequence {
+            run_linux_shortcut_chord(chord)?;
+            thread::sleep(std::time::Duration::from_millis(38));
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for chord in &sequence {
+            run_windows_shortcut_chord(chord)?;
+            thread::sleep(std::time::Duration::from_millis(38));
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for chord in &sequence {
+            run_macos_shortcut_chord(chord)?;
+            thread::sleep(std::time::Duration::from_millis(38));
+        }
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Keyboard shortcuts are not supported on this platform".into())
+}
+
 fn type_text(value: &str) -> Result<(), String> {
     let text = value.trim();
     if text.is_empty() {
@@ -1266,7 +1638,7 @@ fn type_text(value: &str) -> Result<(), String> {
         let mut saw_tool = false;
 
         let xdotool = Command::new("xdotool")
-            .args(["type", "--delay", "1", "--"])
+            .args(["type", "--clearmodifiers", "--delay", "1", "--"])
             .arg(text)
             .status();
         match xdotool {
@@ -1487,7 +1859,13 @@ fn main() {
                     };
                     let _ = update_desktop_click_through(app, &state, next);
                 }
-                "exit" => app.exit(0),
+                "exit" => {
+                    let state = app.state::<AppState>();
+                    if let Some(desktop) = app.get_window("desktop") {
+                        let _ = persist_desktop_window_state(&desktop, state.inner());
+                    }
+                    app.exit(0)
+                }
                 _ => {}
             },
             SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {

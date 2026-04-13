@@ -17,7 +17,9 @@
 
   const NODE_COLORS    = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
   const NODE_TYPES     = ['default', 'script'];
-  const MACRO_ACTIONS  = ['run-script', 'run-uploaded-script', 'type-text', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
+  const MACRO_ACTIONS  = ['run-script', 'run-uploaded-script', 'type-text', 'keyboard-shortcut', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
+  const SHORTCUT_MODIFIER_ORDER = ['Ctrl', 'Alt', 'Shift', 'Meta'];
+  const SHORTCUT_RECORD_IDLE_MS = 1400;
   const NODE_COLOR_MAP = {
     slate:  '#8fa3b5',
     cyan:   '#5ee7f7',
@@ -80,6 +82,8 @@
   let editSelectedLinks = [];
   let editMacroSteps = [];
   let editScriptUpload = null;
+  let recordingShortcutIndex = null;
+  let shortcutRecordStopTimer = null;
 
   let showLauncher    = false;
   let launcherQuery   = '';
@@ -167,9 +171,161 @@
   function createMacroStep(action='run-script', value='') {
     return {action, value};
   }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function normalizeShortcutKeyToken(rawToken) {
+    if (typeof rawToken !== 'string') return null;
+    const token = rawToken.trim();
+    if (!token) return null;
+    const lower = token.toLowerCase();
+
+    if (lower === 'ctrl' || lower === 'control') return 'Ctrl';
+    if (lower === 'alt' || lower === 'option') return 'Alt';
+    if (lower === 'shift') return 'Shift';
+    if (lower === 'meta' || lower === 'cmd' || lower === 'command' || lower === 'win' || lower === 'super' || lower === 'os') return 'Meta';
+    if (lower === 'esc' || lower === 'escape') return 'Esc';
+    if (lower === 'space' || lower === 'spacebar') return 'Space';
+    if (lower === 'enter' || lower === 'return') return 'Enter';
+    if (lower === 'tab') return 'Tab';
+    if (lower === 'delete' || lower === 'del') return 'Delete';
+    if (lower === 'backspace') return 'Backspace';
+    if (lower === 'up' || lower === 'arrowup') return 'Up';
+    if (lower === 'down' || lower === 'arrowdown') return 'Down';
+    if (lower === 'left' || lower === 'arrowleft') return 'Left';
+    if (lower === 'right' || lower === 'arrowright') return 'Right';
+    if (/^f\d{1,2}$/i.test(token)) return token.toUpperCase();
+    if (token.length === 1) return token.toUpperCase();
+    return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+  }
+
+  function normalizeShortcutChord(rawChord) {
+    if (typeof rawChord !== 'string') return '';
+    const tokens = rawChord
+      .split('+')
+      .map(normalizeShortcutKeyToken)
+      .filter(Boolean);
+
+    if (!tokens.length) return '';
+
+    const seen = new Set();
+    const ordered = [];
+
+    for (const modifier of SHORTCUT_MODIFIER_ORDER) {
+      if (tokens.includes(modifier) && !seen.has(modifier)) {
+        ordered.push(modifier);
+        seen.add(modifier);
+      }
+    }
+
+    for (const token of tokens) {
+      if (SHORTCUT_MODIFIER_ORDER.includes(token)) continue;
+      if (!seen.has(token)) {
+        ordered.push(token);
+        seen.add(token);
+      }
+    }
+
+    const hasNonModifier = ordered.some(token => !SHORTCUT_MODIFIER_ORDER.includes(token));
+    if (!hasNonModifier) return '';
+    return ordered.join('+');
+  }
+
+  function normalizeShortcutSequence(rawValue) {
+    if (typeof rawValue !== 'string') return '';
+    return rawValue
+      .split(',')
+      .map(chunk => normalizeShortcutChord(chunk.trim()))
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  function formatShortcutSequence(rawValue) {
+    const normalized = normalizeShortcutSequence(rawValue);
+    if (!normalized) return '';
+    return normalized
+      .split(',')
+      .map(part => part.trim().split('+').join(' + '))
+      .join(', ');
+  }
+
+  function shortcutChordFromEvent(event) {
+    const tokens = [];
+    if (event.ctrlKey) tokens.push('Ctrl');
+    if (event.altKey) tokens.push('Alt');
+    if (event.shiftKey) tokens.push('Shift');
+    if (event.metaKey) tokens.push('Meta');
+
+    const keyToken = normalizeShortcutKeyToken(event.key);
+    if (keyToken && !SHORTCUT_MODIFIER_ORDER.includes(keyToken)) {
+      tokens.push(keyToken);
+    }
+
+    return normalizeShortcutChord(tokens.join('+'));
+  }
+
+  function stopShortcutRecording() {
+    recordingShortcutIndex = null;
+    if (shortcutRecordStopTimer!==null) {
+      clearTimeout(shortcutRecordStopTimer);
+      shortcutRecordStopTimer = null;
+    }
+  }
+
+  function queueShortcutRecordingStop() {
+    if (shortcutRecordStopTimer!==null) clearTimeout(shortcutRecordStopTimer);
+    shortcutRecordStopTimer = setTimeout(() => {
+      shortcutRecordStopTimer = null;
+      recordingShortcutIndex = null;
+    }, SHORTCUT_RECORD_IDLE_MS);
+  }
+
+  function toggleShortcutRecording(index) {
+    if (recordingShortcutIndex === index) {
+      stopShortcutRecording();
+      return;
+    }
+    recordingShortcutIndex = index;
+    editMacroSteps = editMacroSteps.map((step, i) => i===index ? {...step, value:''} : step);
+    queueShortcutRecordingStop();
+  }
+
+  function handleShortcutRecordingKeydown(event) {
+    if (recordingShortcutIndex === null) return false;
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      stopShortcutRecording();
+      return true;
+    }
+
+    const chord = shortcutChordFromEvent(event);
+    if (!chord) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const index = recordingShortcutIndex;
+    editMacroSteps = editMacroSteps.map((step, i) => {
+      if (i !== index) return step;
+      const existing = normalizeShortcutSequence(step.value);
+      const parts = existing
+        ? existing.split(',').map(part => part.trim()).filter(Boolean)
+        : [];
+      parts.push(chord);
+      return {...step, value: parts.join(', ')};
+    });
+
+    queueShortcutRecordingStop();
+    return true;
+  }
+
   function normalizeMacroStep(raw) {
     const action = MACRO_ACTIONS.includes(raw?.action) ? raw.action : 'run-script';
-    const value = typeof raw?.value === 'string' ? raw.value : '';
+    const rawValue = typeof raw?.value === 'string' ? raw.value : '';
+    const value = action === 'keyboard-shortcut' ? normalizeShortcutSequence(rawValue) : rawValue;
     return {action, value};
   }
   function macroActionNeedsValue(action) {
@@ -184,6 +340,7 @@
     if (action === 'run-script') return 'Run script';
     if (action === 'run-uploaded-script') return 'Run uploaded script';
     if (action === 'type-text') return 'Type text';
+    if (action === 'keyboard-shortcut') return 'Keyboard shortcut';
     if (action === 'open-path') return 'Open path';
     if (action === 'open-editor') return 'Open editor';
     if (action === 'open-browser') return 'Open browser';
@@ -195,6 +352,7 @@
     if (action === 'run-script') return 'npm run dev';
     if (action === 'run-uploaded-script') return 'Uses this node uploaded script file';
     if (action === 'type-text') return 'hello world';
+    if (action === 'keyboard-shortcut') return 'Ctrl+Shift+P, Ctrl+K';
     if (action === 'open-path') return '/path/to/project';
     if (action === 'open-editor') return 'code /path/to/project';
     if (action === 'open-browser') return 'https://example.com';
@@ -369,6 +527,14 @@
           updateStatus('No macro steps configured');
           return;
         }
+
+        if (!isNodeBoardWindow && steps.some(step => step.action==='type-text' || step.action==='keyboard-shortcut')) {
+          try {
+            await invoke('hide_main_window');
+            await sleep(140);
+          } catch (_) {}
+        }
+
         await invoke('run_node_macro', {
           steps,
           uploadedScriptPath: normalizeOptionalString(node?.uploaded_script_path),
@@ -616,6 +782,7 @@
   function closeCtx()    { if (!contextMenu.open) return; contextMenu={open:false,x:0,y:0,nodeId:null}; highlightNodeId=hoveredId; }
   function closeEditor() {
     if (!editPopup.open) return;
+    stopShortcutRecording();
     editPopup={open:false,nodeId:null};
     editDraft=createEditDraft();
     editSelectedLinks=[];
@@ -681,17 +848,36 @@
   }
   function removeMacroStep(index) {
     editMacroSteps = editMacroSteps.filter((_, i) => i !== index);
+    if (recordingShortcutIndex === index) {
+      stopShortcutRecording();
+    } else if (recordingShortcutIndex !== null && recordingShortcutIndex > index) {
+      recordingShortcutIndex -= 1;
+    }
   }
   function updateMacroAction(index, action) {
     editMacroSteps = editMacroSteps.map((step, i) => {
       if (i !== index) return step;
       const nextAction = MACRO_ACTIONS.includes(action) ? action : 'run-script';
-      const nextValue = nextAction === 'delay' && !step.value.trim() ? '1000' : (nextAction === 'run-uploaded-script' ? '' : step.value);
+      const normalizedExistingValue = nextAction === 'keyboard-shortcut'
+        ? normalizeShortcutSequence(step.value)
+        : step.value;
+      const nextValue = nextAction === 'delay' && !step.value.trim()
+        ? '1000'
+        : (nextAction === 'run-uploaded-script' ? '' : normalizedExistingValue);
       return {...step, action: nextAction, value: nextValue};
     });
+    if (recordingShortcutIndex === index && action !== 'keyboard-shortcut') {
+      stopShortcutRecording();
+    }
   }
   function updateMacroValue(index, value) {
-    editMacroSteps = editMacroSteps.map((step, i) => i===index ? {...step, value} : step);
+    editMacroSteps = editMacroSteps.map((step, i) => {
+      if (i !== index) return step;
+      const nextValue = step.action === 'keyboard-shortcut'
+        ? normalizeShortcutSequence(value)
+        : value;
+      return {...step, value: nextValue};
+    });
   }
   function toggleEditLink(targetId, enabled) {
     editSelectedLinks = enabled
@@ -856,6 +1042,7 @@
       if (!e.target.closest('.node')&&!e.ctrlKey&&!e.metaKey) { selectedIds=new Set(); expandedNodeId=null; }
     };
     const onKey = e=>{
+      if (handleShortcutRecordingKeydown(e)) return;
       if (e.key==='Escape') { closeCtx(); closeLauncher(); return; }
       if ((e.key.toLowerCase()==='k'&&(e.ctrlKey||e.metaKey))||(e.code==='Space'&&e.altKey)) {
         e.preventDefault(); showLauncher ? closeLauncher() : openLauncher();
@@ -873,6 +1060,7 @@
       window.removeEventListener('pointerup',   onUp);
       window.removeEventListener('pointerdown', onDown);
       window.removeEventListener('keydown',     onKey);
+      stopShortcutRecording();
       if (saveTimer!==null)        clearTimeout(saveTimer);
       if (dragFrame!==null)        cancelAnimationFrame(dragFrame);
       if (springFrame!==null)      cancelAnimationFrame(springFrame);
@@ -1097,26 +1285,27 @@
         </div>
 
         <!-- Status strip -->
+        <div class="board-left-controls">
+          <div class="nb-opacity" title="Node board opacity">
+            <span class="nb-opacity-label">Opacity</span>
+            <input
+              class="nb-opacity-slider"
+              type="range"
+              min={BOARD_OPACITY_MIN}
+              max={BOARD_OPACITY_MAX}
+              step="1"
+              value={boardOpacity}
+              on:input={e=>setBoardOpacity(e.currentTarget.value)}
+              aria-label="Node board opacity"
+            />
+            <span class="nb-opacity-value">{boardOpacity}%</span>
+          </div>
+        </div>
+
         <div class="nb-status">
           <div class="nb-status-left">
             <span class="nb-status-dot"></span>
             <span class="nb-status-text">{statusText}</span>
-          </div>
-          <div class="nb-status-center">
-            <div class="nb-opacity" title="Node board opacity">
-              <span class="nb-opacity-label">Opacity</span>
-              <input
-                class="nb-opacity-slider"
-                type="range"
-                min={BOARD_OPACITY_MIN}
-                max={BOARD_OPACITY_MAX}
-                step="1"
-                value={boardOpacity}
-                on:input={e=>setBoardOpacity(e.currentTarget.value)}
-                aria-label="Node board opacity"
-              />
-              <span class="nb-opacity-value">{boardOpacity}%</span>
-            </div>
           </div>
           <div class="nb-status-right">
             <span class="nb-status-count">{nodes.length} nodes</span>
@@ -1133,7 +1322,7 @@
 
         <!-- Brand header -->
         <header class="panel brand-panel">
-          <div class="brand-identity">
+          <div class="brand-identity" data-tauri-drag-region>
             <div class="brand-logo-wrap">
               <img class="brand-logo" src={appLogo} alt="FinNode" />
             </div>
@@ -1374,7 +1563,7 @@
               <p class="muted" style="padding:8px">No macro steps yet.</p>
             {:else}
               {#each editMacroSteps as step, index (index)}
-                <div class="macro-row">
+                <div class="macro-row" class:macro-row--shortcut={step.action==='keyboard-shortcut'}>
                   <select
                     value={step.action}
                     on:change={e=>updateMacroAction(index, e.currentTarget.value)}
@@ -1383,12 +1572,37 @@
                       <option value={action}>{macroActionLabel(action)}</option>
                     {/each}
                   </select>
-                  <input
-                    value={step.value}
-                    placeholder={macroValuePlaceholder(step.action)}
-                    disabled={step.action==='run-uploaded-script'}
-                    on:input={e=>updateMacroValue(index, e.currentTarget.value)}
-                  />
+
+                  {#if step.action==='keyboard-shortcut'}
+                    <div class="macro-shortcut-field">
+                      <input
+                        value={step.value}
+                        placeholder={macroValuePlaceholder(step.action)}
+                        on:input={e=>updateMacroValue(index, e.currentTarget.value)}
+                      />
+                      {#if step.value}
+                        <div class="macro-shortcut-preview">{formatShortcutSequence(step.value)}</div>
+                      {:else if recordingShortcutIndex===index}
+                        <div class="macro-shortcut-preview">Recording... press keys, then press next combo for multi-switch.</div>
+                      {/if}
+                    </div>
+                    <button
+                      type="button"
+                      class="macro-record-btn"
+                      class:macro-record-btn--active={recordingShortcutIndex===index}
+                      on:click={()=>toggleShortcutRecording(index)}
+                    >
+                      {recordingShortcutIndex===index ? 'Stop' : 'Record'}
+                    </button>
+                  {:else}
+                    <input
+                      value={step.value}
+                      placeholder={macroValuePlaceholder(step.action)}
+                      disabled={step.action==='run-uploaded-script'}
+                      on:input={e=>updateMacroValue(index, e.currentTarget.value)}
+                    />
+                  {/if}
+
                   <button type="button" class="btn-danger-xs" on:click={()=>removeMacroStep(index)}>✕</button>
                 </div>
               {/each}
@@ -1537,7 +1751,19 @@
   .sidebar {
     width:var(--settings-w);
     display:flex; flex-direction:column; gap:10px;
-    overflow:auto; padding-right:2px;
+    overflow:auto;
+    padding:10px 8px;
+    border-radius:22px;
+    border:1px solid rgba(94,231,247,.22);
+    background:
+      radial-gradient(120% 140% at -20% 0%, rgba(94,231,247,.08) 0%, transparent 58%),
+      radial-gradient(130% 140% at 120% 100%, rgba(176,158,255,.08) 0%, transparent 62%),
+      rgba(5,8,14,.6);
+    box-shadow:
+      0 0 0 1px rgba(94,231,247,.08),
+      0 0 28px rgba(94,231,247,.2),
+      0 0 58px rgba(176,158,255,.16),
+      0 18px 42px rgba(0,0,0,.46);
   }
 
   /* ── Panels ─────────────────────────────────────────────────────── */
@@ -1555,7 +1781,12 @@
     display:flex; align-items:center; justify-content:space-between;
     position:sticky; top:0; z-index:5;
   }
-  .brand-identity { display:flex; align-items:center; gap:12px; }
+  .brand-identity {
+    display:flex; align-items:center; gap:12px;
+    cursor:grab;
+    user-select:none;
+  }
+  .brand-identity:active { cursor:grabbing; }
   .brand-logo-wrap {
     width:42px; height:42px; border-radius:14px; flex-shrink:0;
     display:grid; place-items:center;
@@ -2009,11 +2240,19 @@
   .zoom-pct { font-size:.62rem; font-weight:600; color:var(--dim); min-width:34px; text-align:center; letter-spacing:.04em; }
   .zoom-divider { width:1px; height:14px; background:var(--border); margin:0 2px; }
 
+  .board-left-controls {
+    position:absolute;
+    left:12px;
+    bottom:34px;
+    z-index:11;
+    pointer-events:none;
+  }
+
   /* ── Status strip ────────────────────────────────────────────────── */
   .nb-status {
     flex-shrink:0; height:26px;
     display:grid;
-    grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
     align-items:center;
     gap:8px;
     padding:0 14px;
@@ -2029,11 +2268,6 @@
     min-width:0;
   }
   .nb-status-right { justify-content:flex-end; }
-  .nb-status-center {
-    display:flex;
-    align-items:center;
-    justify-content:center;
-  }
   .nb-status-dot {
     width:6px; height:6px; border-radius:50%;
     background:var(--ok); box-shadow:0 0 5px rgba(110,232,154,.5);
@@ -2046,7 +2280,16 @@
     align-items:center;
     gap:6px;
     flex-shrink:0;
-    min-width:182px;
+    min-width:184px;
+    padding:7px 10px;
+    border-radius:999px;
+    border:1px solid rgba(94,231,247,.24);
+    background:rgba(6,10,18,.78);
+    box-shadow:
+      0 6px 20px rgba(0,0,0,.35),
+      0 0 0 1px rgba(94,231,247,.08),
+      0 0 18px rgba(94,231,247,.16);
+    pointer-events:auto;
   }
   .nb-opacity-label,
   .nb-opacity-value {
@@ -2062,9 +2305,8 @@
   }
   .nb-opacity-slider {
     appearance:none;
-    width:96px;
+    width:102px;
     height:3px;
-    margin-left:-6px;
     border-radius:999px;
     background:rgba(94,231,247,.24);
     outline:none;
@@ -2206,6 +2448,9 @@
     padding:6px;
     background:rgba(6,9,15,.45);
   }
+  .macro-row--shortcut {
+    grid-template-columns:minmax(0,148px) minmax(0,1fr) auto auto;
+  }
   .macro-row select,
   .macro-row input {
     width:100%;
@@ -2222,6 +2467,43 @@
   .macro-row input:focus {
     border-color:rgba(94,231,247,.38);
     box-shadow:0 0 0 2px rgba(94,231,247,.06);
+  }
+  .macro-shortcut-field {
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    min-width:0;
+  }
+  .macro-shortcut-preview {
+    font-size:.66rem;
+    color:var(--accent);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    padding:2px 4px;
+    border-radius:6px;
+    background:rgba(94,231,247,.07);
+    border:1px solid rgba(94,231,247,.16);
+    letter-spacing:.01em;
+  }
+  .macro-record-btn {
+    min-width:62px;
+    padding:6px 8px;
+    font-size:.68rem;
+    border-radius:6px;
+    border:1px solid rgba(94,231,247,.25);
+    background:rgba(94,231,247,.08);
+    color:var(--accent);
+  }
+  .macro-record-btn:hover {
+    border-color:rgba(94,231,247,.42);
+    background:rgba(94,231,247,.14);
+  }
+  .macro-record-btn--active {
+    color:#fff;
+    background:rgba(110,232,154,.16);
+    border-color:rgba(110,232,154,.45);
+    box-shadow:0 0 14px rgba(110,232,154,.24);
   }
   .link-row {
     display:flex; align-items:center; gap:9px; font-size:.78rem;
@@ -2327,15 +2609,19 @@
     .btn-row         { grid-template-columns:1fr 1fr; }
     .sel-bar         { grid-template-columns:1fr 1fr; }
     .nodeboard-frame { border-radius:12px; }
+    .board-left-controls {
+      left:10px;
+      bottom:34px;
+    }
     .nb-status {
       grid-template-columns:minmax(0,1fr) auto;
     }
     .nb-status-right {
       display:none;
     }
-    .nb-opacity      { min-width:128px; gap:4px; }
+    .nb-opacity      { min-width:130px; gap:4px; padding:6px 8px; }
     .nb-opacity-label{ display:none; }
-    .nb-opacity-slider { width:72px; }
+    .nb-opacity-slider { width:78px; }
     .script-upload-info {
       flex-direction:column;
       align-items:flex-start;
