@@ -240,6 +240,7 @@ struct AppState {
     stealth: Arc<Mutex<bool>>,
     desktop_visible: Arc<Mutex<bool>>,
     desktop_click_through: Arc<Mutex<bool>>,
+    desktop_state_ready: Arc<Mutex<bool>>,
     /// Bounding boxes of all interactive elements (nodes, popups, etc.)
     node_bounds: Arc<Mutex<Vec<NodeBound>>>,
 }
@@ -336,17 +337,34 @@ fn launch_node(state: State<'_, AppState>, node: ProjectNode, action: String) ->
 #[tauri::command]
 fn run_node_macro(
     app: AppHandle,
+    state: State<'_, AppState>,
     steps: Vec<MacroStep>,
     uploaded_script_path: Option<String>,
     working_dir: Option<String>,
 ) -> Result<(), String> {
     let uploaded_script_path = normalize_optional_owned(uploaded_script_path);
     let working_dir = normalize_optional_owned(working_dir);
-
-    if steps
+    let needs_input_focus = steps
         .iter()
-        .any(|step| step.action == "type-text" || step.action == "keyboard-shortcut")
-    {
+        .any(|step| step.action == "type-text" || step.action == "keyboard-shortcut");
+
+    let should_restore_desktop_after_macro = if needs_input_focus {
+        let stealth = state
+            .stealth
+            .lock()
+            .map(|v| *v)
+            .unwrap_or(false);
+        let desktop_visible = state
+            .desktop_visible
+            .lock()
+            .map(|v| *v)
+            .unwrap_or(false);
+        desktop_visible && !stealth
+    } else {
+        false
+    };
+
+    if needs_input_focus {
         release_macro_input_focus(&app);
     }
 
@@ -354,6 +372,7 @@ fn run_node_macro(
         return Err("No uploaded script configured for this node".into());
     }
 
+    let app_for_thread = app.clone();
     thread::spawn(move || {
         for step in &steps {
             match step.action.as_str() {
@@ -374,6 +393,14 @@ fn run_node_macro(
                 }
                 _ => {}
             }
+        }
+
+        if should_restore_desktop_after_macro {
+            if let Some(desktop) = app_for_thread.get_window("desktop") {
+                let _ = desktop.show();
+                let _ = desktop.unminimize();
+            }
+            set_window_bottom(app_for_thread.clone());
         }
     });
     Ok(())
@@ -958,6 +985,20 @@ fn restore_desktop_window_state(window: &Window, state: &AppState) -> Result<(),
     Ok(())
 }
 
+fn set_desktop_state_ready(state: &AppState, ready: bool) {
+    if let Ok(mut flag) = state.desktop_state_ready.lock() {
+        *flag = ready;
+    }
+}
+
+fn desktop_state_ready(state: &AppState) -> bool {
+    state
+        .desktop_state_ready
+        .lock()
+        .map(|flag| *flag)
+        .unwrap_or(false)
+}
+
 fn persist_desktop_window_state(window: &Window, state: &AppState) -> Result<(), String> {
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
@@ -1271,7 +1312,10 @@ fn release_macro_input_focus(app: &AppHandle) {
     if let Some(main) = app.get_window("main") {
         let _ = main.hide();
     }
-    thread::sleep(std::time::Duration::from_millis(130));
+    if let Some(desktop) = app.get_window("desktop") {
+        let _ = desktop.hide();
+    }
+    thread::sleep(std::time::Duration::from_millis(210));
 }
 
 fn shortcut_modifier_rank(token: &str) -> Option<usize> {
@@ -1745,6 +1789,7 @@ fn create_state() -> AppState {
         stealth: Arc::new(Mutex::new(false)),
         desktop_visible: Arc::new(Mutex::new(true)),
         desktop_click_through: Arc::new(Mutex::new(true)),
+        desktop_state_ready: Arc::new(Mutex::new(false)),
         node_bounds: Arc::new(Mutex::new(Vec::new())),
     }
 }
@@ -1880,7 +1925,9 @@ fn main() {
                 if event.window().label() == "desktop" {
                     let app = event.window().app_handle();
                     let state = app.state::<AppState>();
-                    let _ = persist_desktop_window_state(event.window(), state.inner());
+                    if desktop_state_ready(state.inner()) {
+                        let _ = persist_desktop_window_state(event.window(), state.inner());
+                    }
                     let _ = apply_desktop_mode(&app, &state, false);
                     return;
                 }
@@ -1892,7 +1939,9 @@ fn main() {
                 if event.window().label() == "desktop" {
                     let app = event.window().app_handle();
                     let state = app.state::<AppState>();
-                    let _ = persist_desktop_window_state(event.window(), state.inner());
+                    if desktop_state_ready(state.inner()) {
+                        let _ = persist_desktop_window_state(event.window(), state.inner());
+                    }
                 }
             }
             _ => {}
@@ -1930,6 +1979,7 @@ fn main() {
                 let _ = restore_desktop_window_state(&desktop, state.inner());
                 let _ = desktop.show();
                 set_window_bottom(app_handle.clone());
+                set_desktop_state_ready(state.inner(), true);
 
                 // Keep WebView2 hit-test visible (WM_NCHITTEST handles click-through)
                 let _ = desktop.set_ignore_cursor_events(false);
@@ -1941,6 +1991,9 @@ fn main() {
                     }
                     request_node_bounds_sync(&app_handle);
                 }
+            }
+            else {
+                set_desktop_state_ready(state.inner(), true);
             }
 
             let _ = window.show();
