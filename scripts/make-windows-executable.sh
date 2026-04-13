@@ -33,13 +33,44 @@ resolve_windows_target_dir() {
 }
 
 resolve_windows_target_triple() {
-  if [ -n "${FINNODE_WINDOWS_TARGET_TRIPLE:-}" ]; then
-    echo "${FINNODE_WINDOWS_TARGET_TRIPLE}"
-    return
+  local requested_target="${FINNODE_WINDOWS_TARGET_TRIPLE:-x86_64-pc-windows-msvc}"
+
+  # Standalone mode defaults to MSVC because GNU builds require WebView2Loader.dll at runtime.
+  if [[ "$requested_target" == *-windows-gnu ]] && [ "${FINNODE_ALLOW_WEBVIEW2_DLL:-0}" != "1" ]; then
+    cat >&2 <<EOF
+[FinNode] Refusing GNU target in standalone mode: $requested_target
+[FinNode] GNU builds require WebView2Loader.dll next to finnode.exe.
+[FinNode] Use MSVC for a single-file EXE:
+  FINNODE_WINDOWS_TARGET_TRIPLE=x86_64-pc-windows-msvc npm run make:windows
+
+[FinNode] If you intentionally want GNU + sidecar DLL, opt in explicitly:
+  FINNODE_ALLOW_WEBVIEW2_DLL=1 FINNODE_WINDOWS_TARGET_TRIPLE=$requested_target npm run make:windows
+EOF
+    exit 1
   fi
 
-  # MSVC links the WebView2 loader statically, so no sidecar DLL is required.
-  echo "x86_64-pc-windows-msvc"
+  echo "$requested_target"
+}
+
+exe_imports_webview2_loader() {
+  local exe_path="$1"
+
+  if command -v llvm-objdump >/dev/null 2>&1; then
+    if llvm-objdump -p "$exe_path" 2>/dev/null | grep -qi 'DLL Name: WebView2Loader.dll'; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if command -v objdump >/dev/null 2>&1; then
+    if objdump -x "$exe_path" 2>/dev/null | grep -qi 'DLL Name: WebView2Loader.dll'; then
+      return 0
+    fi
+    return 1
+  fi
+
+  # If import inspection tools are unavailable, do not block the build.
+  return 1
 }
 
 ensure_writable_dir() {
@@ -217,6 +248,16 @@ WINDOWS_DLL_PATH="$WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
 
 if [ ! -f "$WINDOWS_EXE_PATH" ]; then
   echo "[FinNode] Build completed but expected executable was not found at: $WINDOWS_EXE_PATH"
+  exit 1
+fi
+
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc ]] && exe_imports_webview2_loader "$WINDOWS_EXE_PATH"; then
+  cat <<EOF
+[FinNode] Build output still imports WebView2Loader.dll:
+  $WINDOWS_EXE_PATH
+[FinNode] This is not a standalone executable.
+[FinNode] Re-run with MSVC target and without GNU overrides.
+EOF
   exit 1
 fi
 

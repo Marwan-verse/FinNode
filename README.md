@@ -435,7 +435,7 @@ Default target behavior:
 
 - Target triple defaults to `x86_64-pc-windows-msvc`
 - MSVC build links the WebView2 loader statically, so `finnode.exe` is exported as a standalone file (no `WebView2Loader.dll` sidecar)
-- If you explicitly build GNU target, `WebView2Loader.dll` is typically required next to the EXE
+- GNU targets require `WebView2Loader.dll` next to the EXE and are blocked by default unless explicitly opted in
 
 Environment variables:
 
@@ -444,7 +444,11 @@ Environment variables:
 - `FINNODE_WINDOWS_TARGET_TRIPLE`:
 	- override windows target triple
 	- default: `x86_64-pc-windows-msvc`
-	- GNU fallback example: `FINNODE_WINDOWS_TARGET_TRIPLE=x86_64-pc-windows-gnu npm run make:windows`
+	- GNU targets require explicit opt-in with `FINNODE_ALLOW_WEBVIEW2_DLL=1`
+	- GNU example: `FINNODE_ALLOW_WEBVIEW2_DLL=1 FINNODE_WINDOWS_TARGET_TRIPLE=x86_64-pc-windows-gnu npm run make:windows`
+- `FINNODE_ALLOW_WEBVIEW2_DLL`:
+	- default: `0`
+	- set to `1` to intentionally allow GNU builds that require `WebView2Loader.dll`
 - `FINNODE_WINDOWS_TARGET_DIR`:
 	- override cargo target dir for windows builds
 - `CARGO_TARGET_DIR`:
