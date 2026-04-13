@@ -52,7 +52,7 @@
         "label":        "main",
         "title":        "FinNode",
         "width":        360,
-        "height":       820,
+        "height":       920,
         "minWidth":     320,
         "minHeight":    500,
         "transparent":  false,
@@ -67,7 +67,7 @@
       {
         "label":        "desktop",
         "title":        "FinNode Desktop",
-        "width":        860,
+        "width":        960,
         "height":       640,
         "minWidth":     480,
         "minHeight":    320,
