@@ -16,6 +16,7 @@ use tauri::{
     AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
     SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutoStartManagerExt};
 
 static APP_INSTANCE_LOCK: OnceLock<File> = OnceLock::new();
 
@@ -170,12 +171,46 @@ struct HistoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppSettings {
+    #[serde(default = "default_start_on_boot")]
+    start_on_boot: bool,
+    #[serde(default)]
+    desktop_window: Option<SavedWindowState>,
+}
+
+fn default_start_on_boot() -> bool { true }
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            start_on_boot: true,
+            desktop_window: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FrontendAppSettings {
+    start_on_boot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppLayout {
     #[serde(default = "default_workspace_id")]
     active_workspace: String,
     workspaces: Vec<Workspace>,
     #[serde(default)]
     command_history: Vec<HistoryEntry>,
+    #[serde(default)]
+    settings: AppSettings,
 }
 
 fn default_workspace_id() -> String { "default".into() }
@@ -186,6 +221,7 @@ impl Default for AppLayout {
             active_workspace: "default".into(),
             workspaces: vec![default_workspace()],
             command_history: vec![],
+            settings: AppSettings::default(),
         }
     }
 }
@@ -223,6 +259,27 @@ fn save_layout(state: State<'_, AppState>, layout: AppLayout) -> Result<(), Stri
     write_layout(&state.layout_path, &layout)?;
     let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
     *cache = layout;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_app_settings(state: State<'_, AppState>) -> Result<FrontendAppSettings, String> {
+    let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    Ok(FrontendAppSettings {
+        start_on_boot: cache.settings.start_on_boot,
+    })
+}
+
+#[tauri::command]
+fn set_start_on_boot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    apply_start_on_boot(&app, enabled)?;
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    cache.settings.start_on_boot = enabled;
+    write_layout(&state.layout_path, &cache)?;
     Ok(())
 }
 
@@ -852,6 +909,61 @@ fn apply_stealth_mode(app: &AppHandle, state: &State<'_, AppState>, enabled: boo
     Ok(())
 }
 
+fn apply_start_on_boot(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn restore_desktop_window_state(window: &Window, state: &AppState) -> Result<(), String> {
+    let saved = {
+        let cache = state
+            .cached_layout
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?;
+        cache.settings.desktop_window.clone()
+    };
+
+    if let Some(saved) = saved {
+        window
+            .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                saved.width,
+                saved.height,
+            )))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                saved.x,
+                saved.y,
+            )))
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn persist_desktop_window_state(window: &Window, state: &AppState) -> Result<(), String> {
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+
+    let mut cache = state
+        .cached_layout
+        .lock()
+        .map_err(|_| "lock poisoned".to_string())?;
+    cache.settings.desktop_window = Some(SavedWindowState {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+    });
+    write_layout(&state.layout_path, &cache)?;
+    Ok(())
+}
+
 // ── Layout I/O ───────────────────────────────────────────────────────────────
 
 fn read_layout(path: &Path) -> Result<AppLayout, String> {
@@ -875,6 +987,7 @@ fn read_layout(path: &Path) -> Result<AppLayout, String> {
                 pan_y: 0.0,
             }],
             command_history: vec![],
+            settings: AppSettings::default(),
         });
     }
 
@@ -1341,6 +1454,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .system_tray(build_system_tray())
         .manage(create_state())
         .on_system_tray_event(|app, event| match event {
@@ -1382,12 +1496,13 @@ fn main() {
             }
             _ => {}
         })
-        .on_window_event(|event| {
-            if let WindowEvent::CloseRequested { api, .. } = event.event() {
+        .on_window_event(|event| match event.event() {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if event.window().label() == "desktop" {
                     let app = event.window().app_handle();
                     let state = app.state::<AppState>();
+                    let _ = persist_desktop_window_state(event.window(), state.inner());
                     let _ = apply_desktop_mode(&app, &state, false);
                     return;
                 }
@@ -1395,6 +1510,14 @@ fn main() {
                     let _ = event.window().hide();
                 }
             }
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                if event.window().label() == "desktop" {
+                    let app = event.window().app_handle();
+                    let state = app.state::<AppState>();
+                    let _ = persist_desktop_window_state(event.window(), state.inner());
+                }
+            }
+            _ => {}
         })
         .setup(|app| {
             let window = app.get_window("main").expect("main window");
@@ -1404,8 +1527,13 @@ fn main() {
 
             let state = app.state::<AppState>();
             let layout = read_layout(&state.layout_path).unwrap_or_default();
+            let startup_enabled = layout.settings.start_on_boot;
             let _ = write_layout(&state.layout_path, &layout);
             *state.cached_layout.lock().expect("cache") = layout;
+
+            if let Err(e) = apply_start_on_boot(&app_handle, startup_enabled) {
+                eprintln!("failed to apply start-on-boot setting: {e}");
+            }
 
             // Startup policy: background click-through starts enabled.
             let _ = update_desktop_click_through(&app_handle, &state, true);
@@ -1421,6 +1549,7 @@ fn main() {
                 let _ = desktop.set_skip_taskbar(true);
                 let _ = desktop.set_always_on_top(false);
                 let _ = desktop.set_resizable(true);
+                let _ = restore_desktop_window_state(&desktop, state.inner());
                 let _ = desktop.show();
                 set_window_bottom(app_handle.clone());
 
@@ -1442,6 +1571,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             load_layout, save_layout, launch_node, run_node_macro, save_uploaded_script,
+            get_app_settings, set_start_on_boot,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
             update_node_bounds,
             get_platform,

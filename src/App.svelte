@@ -93,6 +93,8 @@
   const BOARD_OPACITY_MIN = 20;
   const BOARD_OPACITY_MAX = 100;
   let boardOpacity = BOARD_OPACITY_MAX;
+  let appSettings = { start_on_boot: true };
+  let savingStartOnBoot = false;
 
   /* ─── Helpers ────────────────────────────────────────────────────── */
   function zoomIn()  { zoomLevel = Math.min(ZOOM_MAX, parseFloat((zoomLevel + ZOOM_STEP).toFixed(2))); queueRender(); }
@@ -101,8 +103,48 @@
     boardOpacity = clamp(Math.round(Number(value) || BOARD_OPACITY_MAX), BOARD_OPACITY_MIN, BOARD_OPACITY_MAX);
   }
 
-  async function minimizeWindow() { try { await appWindow.minimize(); } catch(e) {} }
-  async function closeWindow()    { try { await appWindow.close();    } catch(e) {} }
+  async function loadAppSettings() {
+    try {
+      const settings = await invoke('get_app_settings');
+      appSettings = {
+        start_on_boot: Boolean(settings?.start_on_boot ?? true)
+      };
+    } catch (e) {
+      updateStatus(`Failed to load app settings: ${String(e)}`);
+    }
+  }
+
+  async function updateStartOnBoot(enabled) {
+    const previous = appSettings.start_on_boot;
+    appSettings = {...appSettings, start_on_boot: enabled};
+    savingStartOnBoot = true;
+    try {
+      await invoke('set_start_on_boot', { enabled });
+      updateStatus(enabled ? 'Start on boot enabled' : 'Start on boot disabled');
+    } catch (e) {
+      appSettings = {...appSettings, start_on_boot: previous};
+      updateStatus(`Startup setting failed: ${String(e)}`);
+    } finally {
+      savingStartOnBoot = false;
+    }
+  }
+
+  async function minimizeWindow() {
+    try {
+      await invoke('hide_main_window');
+      updateStatus('Settings hidden to tray');
+    } catch (e) {
+      updateStatus(String(e));
+    }
+  }
+
+  async function exitApplication() {
+    try {
+      await invoke('exit_app');
+    } catch (e) {
+      updateStatus(String(e));
+    }
+  }
 
   function createEditDraft() {
     return {
@@ -801,6 +843,7 @@
     }
 
     await loadWorkspaces();
+    await loadAppSettings();
     await tick();
     setupResizeObserver();
 
@@ -1101,9 +1144,25 @@
           </div>
           <div class="wm-btns">
             <button class="wm-btn wm-btn--min"   on:click={minimizeWindow} title="Minimize">−</button>
-            <button class="wm-btn wm-btn--close"  on:click={closeWindow}   title="Close">✕</button>
+            <button class="wm-btn wm-btn--close"  on:click={exitApplication}   title="Exit app">✕</button>
           </div>
         </header>
+
+        <!-- App settings -->
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Application</h2>
+          </div>
+          <label class="setting-row">
+            <span>Start app when the PC starts</span>
+            <input
+              type="checkbox"
+              checked={appSettings.start_on_boot}
+              disabled={savingStartOnBoot}
+              on:change={e=>updateStartOnBoot(e.currentTarget.checked)}
+            />
+          </label>
+        </section>
 
         <!-- Workspaces -->
         <section class="panel">
@@ -1514,6 +1573,24 @@
   .panel-head h2 {
     margin:0; font-size:.64rem; font-weight:600;
     text-transform:uppercase; letter-spacing:.14em; color:var(--soft);
+  }
+  .setting-row {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    padding:9px 10px;
+    border:1px solid var(--bsoft);
+    border-radius:var(--r-sm);
+    background:rgba(6,9,15,.45);
+    font-size:.78rem;
+    color:var(--text);
+  }
+  .setting-row input[type=checkbox] {
+    width:16px;
+    height:16px;
+    accent-color:var(--accent);
+    flex-shrink:0;
   }
   .badge {
     font-size:.64rem; font-weight:600; padding:2px 7px;
@@ -1987,6 +2064,7 @@
     appearance:none;
     width:96px;
     height:3px;
+    margin-left:-6px;
     border-radius:999px;
     background:rgba(94,231,247,.24);
     outline:none;
