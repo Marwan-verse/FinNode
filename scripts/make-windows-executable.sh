@@ -32,6 +32,16 @@ resolve_windows_target_dir() {
   echo "$repo_root/src-tauri/target"
 }
 
+resolve_windows_target_triple() {
+  if [ -n "${FINNODE_WINDOWS_TARGET_TRIPLE:-}" ]; then
+    echo "${FINNODE_WINDOWS_TARGET_TRIPLE}"
+    return
+  fi
+
+  # MSVC links the WebView2 loader statically, so no sidecar DLL is required.
+  echo "x86_64-pc-windows-msvc"
+}
+
 ensure_writable_dir() {
   local dir="$1"
   mkdir -p "$dir"
@@ -80,6 +90,33 @@ install_apt_packages() {
   run_privileged apt-get install -y "${packages[@]}"
 }
 
+ensure_cargo_xwin() {
+  if command -v cargo-xwin >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "[FinNode] Installing cargo-xwin..."
+  cargo install cargo-xwin --locked
+}
+
+ensure_msvc_cross_toolchain_linux() {
+  local missing=()
+
+  if ! command -v clang-cl >/dev/null 2>&1; then
+    missing+=(clang)
+  fi
+
+  if ! command -v lld-link >/dev/null 2>&1; then
+    missing+=(lld)
+  fi
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    install_apt_packages "${missing[@]}"
+  fi
+
+  ensure_cargo_xwin
+}
+
 # Load Cargo path first when rustup is already installed.
 if [ -s "$HOME/.cargo/env" ]; then
   # shellcheck disable=SC1091
@@ -93,14 +130,37 @@ if ! command -v cargo >/dev/null 2>&1; then
   source "$HOME/.cargo/env"
 fi
 
-if ! rustup target list --installed | grep -qx 'x86_64-pc-windows-gnu'; then
-  echo "[FinNode] Installing Windows Rust target..."
-  rustup target add x86_64-pc-windows-gnu
+WINDOWS_TARGET_TRIPLE="$(resolve_windows_target_triple)"
+
+if ! rustup target list --installed | grep -qx "$WINDOWS_TARGET_TRIPLE"; then
+  echo "[FinNode] Installing Windows Rust target ($WINDOWS_TARGET_TRIPLE)..."
+  rustup target add "$WINDOWS_TARGET_TRIPLE"
 fi
 
-if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-  install_apt_packages gcc-mingw-w64-x86-64
-fi
+case "$WINDOWS_TARGET_TRIPLE" in
+  *-windows-gnu)
+    if [ "$WINDOWS_TARGET_TRIPLE" != "x86_64-pc-windows-gnu" ]; then
+      echo "[FinNode] Unsupported GNU target triple: $WINDOWS_TARGET_TRIPLE"
+      echo "[FinNode] Supported GNU triple: x86_64-pc-windows-gnu"
+      exit 1
+    fi
+
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+      install_apt_packages gcc-mingw-w64-x86-64
+    fi
+    ;;
+  *-windows-msvc)
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+      ensure_msvc_cross_toolchain_linux
+    fi
+    ;;
+  *)
+    echo "[FinNode] Unsupported windows target triple: $WINDOWS_TARGET_TRIPLE"
+    echo "[FinNode] Use a Windows GNU/MSVC triple, for example:"
+    echo "  FINNODE_WINDOWS_TARGET_TRIPLE=x86_64-pc-windows-msvc"
+    exit 1
+    ;;
+esac
 
 if ! command -v npm >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then
   # shellcheck disable=SC1091
@@ -138,12 +198,20 @@ if [ "$WINDOWS_TARGET_DIR" != "$(pwd)/src-tauri/target" ]; then
   echo "[FinNode] Using CARGO_TARGET_DIR=$WINDOWS_TARGET_DIR"
 fi
 
-echo "[FinNode] Building Windows executable..."
-CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+echo "[FinNode] Building Windows executable for $WINDOWS_TARGET_TRIPLE..."
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]]; then
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+    CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
+    cargo build --release --target "$WINDOWS_TARGET_TRIPLE" --manifest-path src-tauri/Cargo.toml
+elif [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc && "${OSTYPE:-}" == linux* ]]; then
   CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
-  cargo build --release --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml
+    cargo xwin build --release --target "$WINDOWS_TARGET_TRIPLE" --manifest-path src-tauri/Cargo.toml
+else
+  CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
+    cargo build --release --target "$WINDOWS_TARGET_TRIPLE" --manifest-path src-tauri/Cargo.toml
+fi
 
-WINDOWS_OUTPUT_DIR="$WINDOWS_TARGET_DIR/x86_64-pc-windows-gnu/release"
+WINDOWS_OUTPUT_DIR="$WINDOWS_TARGET_DIR/$WINDOWS_TARGET_TRIPLE/release"
 WINDOWS_EXE_PATH="$WINDOWS_OUTPUT_DIR/finnode.exe"
 WINDOWS_DLL_PATH="$WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
 
@@ -156,16 +224,26 @@ WINDOWS_EXPORT_DIR="${FINNODE_WINDOWS_EXPORT_DIR:-$(pwd)/artifacts/windows}"
 mkdir -p "$WINDOWS_EXPORT_DIR"
 
 cp -f "$WINDOWS_EXE_PATH" "$WINDOWS_EXPORT_DIR/finnode.exe"
-if [ -f "$WINDOWS_DLL_PATH" ]; then
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]] && [ -f "$WINDOWS_DLL_PATH" ]; then
   cp -f "$WINDOWS_DLL_PATH" "$WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+fi
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc ]]; then
+  rm -f "$WINDOWS_EXPORT_DIR/WebView2Loader.dll"
 fi
 
 echo "[FinNode] Internal build output: $WINDOWS_EXE_PATH"
-echo "[FinNode] Supporting runtime file (internal): $WINDOWS_DLL_PATH"
 echo "[FinNode] Final exported artifacts: $WINDOWS_EXPORT_DIR"
 echo "[FinNode] USE THIS FILE: $WINDOWS_EXPORT_DIR/finnode.exe"
-if [ -f "$WINDOWS_EXPORT_DIR/WebView2Loader.dll" ]; then
-  echo "[FinNode] Runtime DLL: $WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc ]]; then
+  echo "[FinNode] Target: $WINDOWS_TARGET_TRIPLE (WebView2 loader is statically linked)"
+fi
+if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]]; then
+  echo "[FinNode] Target: $WINDOWS_TARGET_TRIPLE"
+  if [ -f "$WINDOWS_EXPORT_DIR/WebView2Loader.dll" ]; then
+    echo "[FinNode] Runtime DLL: $WINDOWS_EXPORT_DIR/WebView2Loader.dll"
+  else
+    echo "[FinNode] Warning: WebView2Loader.dll was not found. GNU builds usually need it next to the EXE."
+  fi
 fi
 
 if command -v wslpath >/dev/null 2>&1; then

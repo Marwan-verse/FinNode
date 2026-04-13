@@ -3,7 +3,7 @@
 FinNode is a desktop project navigator built with Tauri (Rust backend) and Svelte (frontend).
 It gives you a draggable node board window and a separate settings/control window so you can launch project actions, run macros, type text, and send keyboard shortcut sequences quickly.
 
-[Website](https://www.marrr.me/FinNode)
+This README is intentionally detailed and maps directly to the current codebase.
 
 ## Table of Contents
 
@@ -430,12 +430,21 @@ npm run make:windows
 Default exported artifacts:
 
 - `artifacts/windows/finnode.exe`
-- `artifacts/windows/WebView2Loader.dll` (if present)
+
+Default target behavior:
+
+- Target triple defaults to `x86_64-pc-windows-msvc`
+- MSVC build links the WebView2 loader statically, so `finnode.exe` is exported as a standalone file (no `WebView2Loader.dll` sidecar)
+- If you explicitly build GNU target, `WebView2Loader.dll` is typically required next to the EXE
 
 Environment variables:
 
 - `FINNODE_WINDOWS_EXPORT_DIR`:
 	- override final artifact export directory
+- `FINNODE_WINDOWS_TARGET_TRIPLE`:
+	- override windows target triple
+	- default: `x86_64-pc-windows-msvc`
+	- GNU fallback example: `FINNODE_WINDOWS_TARGET_TRIPLE=x86_64-pc-windows-gnu npm run make:windows`
 - `FINNODE_WINDOWS_TARGET_DIR`:
 	- override cargo target dir for windows builds
 - `CARGO_TARGET_DIR`:
@@ -444,6 +453,7 @@ Environment variables:
 Notes:
 
 - Script may relocate target dir automatically for `/mnt/*` workspace cases to avoid resource file issues.
+- On Linux with MSVC target, first build may install `cargo-xwin` and download cross-linker components.
 
 ## Troubleshooting
 
