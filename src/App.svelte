@@ -1,5 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import { fade, fly, scale } from 'svelte/transition';
   import { invoke } from '@tauri-apps/api/tauri';
   import { listen } from '@tauri-apps/api/event';
   import { appWindow } from '@tauri-apps/api/window';
@@ -104,6 +105,14 @@
   let appSettings = { start_on_boot: true, run_macro_on_system_start: false };
   let savingStartOnBoot = false;
   let savingRunMacroOnSystemStart = false;
+  let prefersReducedMotion = false;
+  let reducedMotionQuery = null;
+  let reducedMotionListener = null;
+  let statusFlash = false;
+  let statusVersion = 0;
+  let statusFlashTimer = null;
+  let workspaceSwitchTimer = null;
+  let isSwitchingWorkspace = false;
 
   /* ─── Helpers ────────────────────────────────────────────────────── */
   function zoomIn()  { zoomLevel = Math.min(ZOOM_MAX, parseFloat((zoomLevel + ZOOM_STEP).toFixed(2))); queueRender(); }
@@ -195,6 +204,29 @@
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function motionDuration(ms) {
+    return prefersReducedMotion ? 1 : ms;
+  }
+
+  function scheduleStatusFlash() {
+    statusFlash = false;
+
+    if (statusFlashTimer !== null) {
+      clearTimeout(statusFlashTimer);
+      statusFlashTimer = null;
+    }
+
+    if (prefersReducedMotion) return;
+
+    void tick().then(() => {
+      statusFlash = true;
+      statusFlashTimer = setTimeout(() => {
+        statusFlash = false;
+        statusFlashTimer = null;
+      }, motionDuration(420));
+    });
   }
 
   function normalizeShortcutKeyToken(rawToken) {
@@ -471,7 +503,39 @@
     const stamp = new Date().toLocaleTimeString();
     activityLog = [{id:`${Date.now()}-${Math.random().toString(36).slice(2,7)}`, text:`${stamp} ${message}`}, ...activityLog].slice(0,8);
   }
-  function updateStatus(message) { statusText = message; recordActivity(message); }
+  function updateStatus(message) {
+    statusText = message;
+    statusVersion += 1;
+    scheduleStatusFlash();
+    recordActivity(message);
+  }
+
+  function setupReducedMotionListener() {
+    if (typeof window==='undefined' || typeof window.matchMedia!=='function') return () => {};
+
+    reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    prefersReducedMotion = reducedMotionQuery.matches;
+    reducedMotionListener = event => {
+      prefersReducedMotion = Boolean(event?.matches);
+    };
+
+    if (typeof reducedMotionQuery.addEventListener === 'function') {
+      reducedMotionQuery.addEventListener('change', reducedMotionListener);
+    } else if (typeof reducedMotionQuery.addListener === 'function') {
+      reducedMotionQuery.addListener(reducedMotionListener);
+    }
+
+    return () => {
+      if (!reducedMotionQuery || !reducedMotionListener) return;
+      if (typeof reducedMotionQuery.removeEventListener === 'function') {
+        reducedMotionQuery.removeEventListener('change', reducedMotionListener);
+      } else if (typeof reducedMotionQuery.removeListener === 'function') {
+        reducedMotionQuery.removeListener(reducedMotionListener);
+      }
+      reducedMotionQuery = null;
+      reducedMotionListener = null;
+    };
+  }
 
   /* ─── Workspace CRUD ─────────────────────────────────────────────── */
   function updateActiveWorkspaceNodes(nextNodes) {
@@ -510,6 +574,13 @@
   }
   async function switchWorkspace(wsId) {
     if (!wsId||wsId===activeWorkspaceId) return;
+
+    isSwitchingWorkspace = true;
+    if (workspaceSwitchTimer!==null) {
+      clearTimeout(workspaceSwitchTimer);
+      workspaceSwitchTimer = null;
+    }
+
     try {
       await flushPendingSave();
       const layout = await invoke('switch_workspace', {workspaceId:wsId});
@@ -517,6 +588,12 @@
       const ws = workspaces.find(ws=>ws.id===activeWorkspaceId);
       updateStatus(`Switched to ${ws?.name??'workspace'}`);
     } catch(e) { updateStatus(String(e)); }
+    finally {
+      workspaceSwitchTimer = setTimeout(() => {
+        isSwitchingWorkspace = false;
+        workspaceSwitchTimer = null;
+      }, motionDuration(190));
+    }
   }
   async function createWorkspace() {
     const name = workspaceName.trim(); if (!name) return;
@@ -1079,6 +1156,7 @@
 
   /* ─── Bootstrap ──────────────────────────────────────────────────── */
   async function bootstrap() {
+    const teardownReducedMotion = setupReducedMotionListener();
     const unlistenLayout   = await listen('layout-updated', ()=>void loadWorkspaces());
     const unlistenLauncher = await listen('toggle-quick-launcher', ()=>{
       showLauncher ? closeLauncher() : openLauncher();
@@ -1116,6 +1194,7 @@
     window.addEventListener('keydown',     onKey);
     return ()=>{
       unlistenLayout(); unlistenLauncher();
+      teardownReducedMotion();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup',   onUp);
@@ -1123,6 +1202,8 @@
       window.removeEventListener('keydown',     onKey);
       stopShortcutRecording();
       if (saveTimer!==null)        clearTimeout(saveTimer);
+      if (statusFlashTimer!==null) clearTimeout(statusFlashTimer);
+      if (workspaceSwitchTimer!==null) clearTimeout(workspaceSwitchTimer);
       if (dragFrame!==null)        cancelAnimationFrame(dragFrame);
       if (springFrame!==null)      cancelAnimationFrame(springFrame);
       if (nodeLayerResizeObserver) nodeLayerResizeObserver.disconnect();
@@ -1210,7 +1291,8 @@
 
           <!-- Zoom root: both SVG links + nodes scale together -->
           <div class="zoom-root"
-               bind:this={nodeLayer}
+            class:zoom-root--workspace-shift={isSwitchingWorkspace}
+            bind:this={nodeLayer}
             style="transform:translate({boardPan.x}px,{boardPan.y}px) scale({zoomLevel});transform-origin:0 0;position:absolute;inset:0;width:100%;height:100%;">
 
             <!-- SVG links: coordinates match node renderX/Y (logical space) -->
@@ -1245,6 +1327,8 @@
                 role="button"
                 tabindex="0"
                 use:nodeRef={node.id}
+                in:fade={{ duration: motionDuration(160) }}
+                out:fade={{ duration: motionDuration(120) }}
                 style="left:{node.renderX}px;top:{node.renderY}px;--nc:{nodeColor(node)}"
                 on:pointerdown={e=>beginDrag(e,node.id)}
                 on:click={e=>onNodeClick(e,node.id)}
@@ -1372,8 +1456,13 @@
 
         <div class="nb-status">
           <div class="nb-status-left">
-            <span class="nb-status-dot"></span>
-            <span class="nb-status-text">{statusText}</span>
+            <span class="nb-status-dot" class:nb-status-dot--flash={statusFlash}></span>
+            {#key statusVersion}
+              <span class="nb-status-text"
+                in:fade={{ duration: motionDuration(150) }}
+                out:fade={{ duration: motionDuration(90) }}
+              >{statusText}</span>
+            {/key}
           </div>
           <div class="nb-status-right">
             <span class="nb-status-count">{nodes.length} nodes</span>
@@ -1473,10 +1562,16 @@
             </div>
           {/if}
 
-          <div class="node-list">
+          <div class="node-list" class:node-list--workspace-shift={isSwitchingWorkspace}>
             {#each nodes as node (node.id)}
               {@const locked=isLockedNode(node)}
-              <div class="node-row" class:node-row--sel={selectedIds.has(node.id)} style="--nc:{nodeColor(node)}">
+              <div
+                class="node-row"
+                class:node-row--sel={selectedIds.has(node.id)}
+                style="--nc:{nodeColor(node)}"
+                in:fade={{ duration: motionDuration(130) }}
+                out:fade={{ duration: motionDuration(90) }}
+              >
                 <span class="node-row-pip"></span>
                 <span class="node-row-name" title={node.name||'Untitled'}>{node.name||'Untitled'}</span>
                 <div class="node-row-acts">
@@ -1499,13 +1594,22 @@
             <h2>Status</h2>
             <span class="status-dot" class:status-dot--ok={!statusText.toLowerCase().includes('error')}></span>
           </div>
-          <p class="status-msg">{statusText}</p>
+          {#key statusVersion}
+            <p class="status-msg"
+              in:fade={{ duration: motionDuration(150) }}
+              out:fade={{ duration: motionDuration(90) }}
+            >{statusText}</p>
+          {/key}
           <div class="activity">
             {#if activityLog.length===0}
               <p class="muted">No activity yet.</p>
             {:else}
               {#each activityLog as item (item.id)}
-                <div class="activity-item">{item.text}</div>
+                <div
+                  class="activity-item"
+                  in:fly={{ y: -8, duration: motionDuration(180), opacity: 0 }}
+                  out:fade={{ duration: motionDuration(90) }}
+                >{item.text}</div>
               {/each}
             {/if}
           </div>
@@ -1518,8 +1622,17 @@
   <!-- ══════════════════════ EDITOR MODAL ════════════════════════════ -->
   {#if editPopup.open&&editNode}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <div class="modal-overlay" role="presentation">
-      <section class="editor-modal">
+    <div
+      class="modal-overlay"
+      role="presentation"
+      in:fade={{ duration: motionDuration(140) }}
+      out:fade={{ duration: motionDuration(110) }}
+    >
+      <section
+        class="editor-modal"
+        in:scale={{ duration: motionDuration(180), start: 0.97 }}
+        out:scale={{ duration: motionDuration(120), start: 0.99 }}
+      >
         <header class="editor-header">
           <div class="editor-title-row">
             <div class="editor-preview-dot" style="background:{nodeColor(editNode)};box-shadow:0 0 10px {nodeColor(editNode)}88"></div>
@@ -1719,7 +1832,13 @@
 
   <!-- ══════════════════════ CONTEXT MENU ════════════════════════════ -->
   {#if contextMenu.open&&contextNode}
-    <div class="ctx-menu" style="left:{contextMenu.x}px;top:{contextMenu.y}px" on:pointerdown|stopPropagation>
+    <div
+      class="ctx-menu"
+      style="left:{contextMenu.x}px;top:{contextMenu.y}px"
+      on:pointerdown|stopPropagation
+      in:scale={{ duration: motionDuration(130), start: 0.97 }}
+      out:fade={{ duration: motionDuration(90) }}
+    >
       <div class="ctx-title">
         <div class="ctx-dot" style="background:{nodeColor(contextNode)}"></div>
         {contextNode.name||'Untitled node'}
@@ -1750,8 +1869,18 @@
   <!-- ══════════════════════ LAUNCHER ════════════════════════════════ -->
   {#if showLauncher}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <div class="launcher-overlay" role="presentation" on:click|self={closeLauncher}>
-      <section class="launcher">
+    <div
+      class="launcher-overlay"
+      role="presentation"
+      on:click|self={closeLauncher}
+      in:fade={{ duration: motionDuration(140) }}
+      out:fade={{ duration: motionDuration(110) }}
+    >
+      <section
+        class="launcher"
+        in:scale={{ duration: motionDuration(170), start: 0.97 }}
+        out:scale={{ duration: motionDuration(120), start: 0.99 }}
+      >
         <div class="launcher-search">
           <span class="launcher-icon">⌘</span>
           <input id="launcher-input" class="launcher-input"
@@ -1765,6 +1894,8 @@
         <div class="launcher-list">
           {#each launcherResults as node, i (node.id)}
             <button class="launcher-item" class:launcher-item--active={i===launcherIndex}
+              in:fly={{ y: 6, duration: motionDuration(150), delay: prefersReducedMotion ? 0 : i * 22, opacity: 0 }}
+              out:fade={{ duration: motionDuration(80) }}
               on:click={()=>{void launchNode(node,'open-path');closeLauncher();}}>
               <span class="launcher-item-dot" style="background:{nodeColor(node)}"></span>
               <span class="launcher-item-name">{node.name||'Untitled'}</span>
@@ -1805,6 +1936,11 @@
     --ok:      #6ee89a;
     --border:  rgba(110,170,220,0.13);
     --bsoft:   rgba(110,170,220,0.07);
+    --motion-fast: 120ms;
+    --motion-base: 180ms;
+    --motion-slow: 260ms;
+    --motion-curve: cubic-bezier(.22,1,.36,1);
+    --motion-pop: cubic-bezier(.34,1.56,.64,1);
     --r-sm: 8px;  --r-md: 14px;  --r-lg: 20px;  --r-xl: 26px;
     --node-sz: 108px;
     --settings-w: 320px;
@@ -2001,12 +2137,21 @@
   .sel-bar .danger { border-color:rgba(255,100,120,.2); color:#ff8fa0; }
 
   /* ── Node list (sidebar) ────────────────────────────────────────── */
-  .node-list { margin-top:10px; display:flex; flex-direction:column; gap:4px; max-height:240px; overflow:auto; }
+  .node-list {
+    margin-top:10px;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    max-height:240px;
+    overflow:auto;
+    transition:opacity var(--motion-base) var(--motion-curve), transform var(--motion-base) var(--motion-curve);
+  }
+  .node-list--workspace-shift { opacity:.68; transform:translateY(4px); }
   .node-row {
     border:1px solid var(--bsoft); border-radius:var(--r-sm);
     background:rgba(6,9,15,.5); padding:7px 10px;
     display:flex; align-items:center; gap:8px;
-    transition:border-color 120ms, background 120ms;
+    transition:border-color var(--motion-fast) var(--motion-curve), background var(--motion-fast) var(--motion-curve);
   }
   .node-row:hover { background:rgba(94,231,247,.03); border-color:var(--border); }
   .node-row--sel  { border-color:rgba(94,231,247,.28); background:rgba(94,231,247,.04); }
@@ -2025,7 +2170,7 @@
   .status-dot--ok { background:var(--ok); box-shadow:0 0 6px rgba(110,232,154,.5); }
   .status-msg { margin:0; font-size:.8rem; color:var(--soft); }
   .activity { display:flex; flex-direction:column; gap:4px; max-height:100px; overflow:auto; }
-  .activity-item { font-size:.7rem; color:var(--dim); padding:3px 0; border-bottom:1px solid var(--bsoft); line-height:1.3; }
+  .activity-item { font-size:.7rem; color:var(--dim); padding:3px 0; border-bottom:1px solid var(--bsoft); line-height:1.3; will-change:transform, opacity; }
   .muted { margin:0; color:var(--dim); font-size:.74rem; }
 
   /* ════════════════ NODE BOARD ════════════════════════════════════ */
@@ -2116,15 +2261,17 @@
     position:absolute; inset:0;
     width:100%; height:100%;
     transform-origin:0 0;
-    will-change:transform;
+    will-change:transform, opacity;
+    transition:opacity var(--motion-base) var(--motion-curve);
     z-index:1;
   }
+  .zoom-root--workspace-shift { opacity:.74; }
 
   /* ── SVG links ───────────────────────────────────────────────────── */
   .links { position:absolute; inset:0; pointer-events:none; overflow:visible; }
   .link {
     fill:none; stroke:rgba(94,231,247,.2); stroke-width:1.5;
-    transition:stroke 200ms, stroke-width 200ms;
+    transition:stroke var(--motion-base) var(--motion-curve), stroke-width var(--motion-base) var(--motion-curve);
     filter:drop-shadow(0 0 3px rgba(94,231,247,.15));
   }
   .link--highlight {
@@ -2150,9 +2297,9 @@
       inset 0 1px 0 rgba(255,255,255,.06),
       inset 0 -1px 0 rgba(0,0,0,.18);
     transition:
-      transform 180ms cubic-bezier(.34,1.56,.64,1),
-      box-shadow 200ms ease,
-      border-color 200ms ease;
+      transform var(--motion-base) var(--motion-pop),
+      box-shadow var(--motion-base) var(--motion-curve),
+      border-color var(--motion-base) var(--motion-curve);
     transform-origin:center center;
     will-change:left,top,transform;
     overflow:visible; /* allow action buttons to pop out */
@@ -2162,7 +2309,7 @@
   .node-ring {
     position:absolute; inset:-4px; border-radius:50%;
     border:1.5px solid transparent;
-    transition:all 250ms ease; pointer-events:none;
+    transition:all var(--motion-slow) var(--motion-curve); pointer-events:none;
     background:transparent;
   }
   .node--hovered .node-ring {
@@ -2235,7 +2382,7 @@
     width:16px; height:16px; padding:0; display:grid; place-items:center;
     font-size:.78rem; line-height:1; border-radius:4px;
     background:rgba(6,9,15,.7); border:1px solid rgba(110,165,200,.18); color:var(--soft);
-    opacity:0; transition:opacity 140ms, border-color 140ms, color 140ms;
+    opacity:0; transition:opacity var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
   }
   .node:hover .node-edit-btn { opacity:1; }
   .node-edit-btn:hover { border-color:rgba(94,231,247,.4); color:var(--accent); }
@@ -2280,7 +2427,7 @@
     z-index:20;
     white-space:nowrap;
     pointer-events:auto;
-    animation:actions-pop .2s cubic-bezier(.34,1.56,.64,1) both;
+    animation:actions-pop .2s var(--motion-pop) both;
   }
   @keyframes actions-pop {
     from { transform:translateX(-50%) scale(.75); opacity:0; }
@@ -2292,7 +2439,7 @@
     border:1px solid transparent;
     background:rgba(255,255,255,.04);
     color:var(--soft); font-size:.65rem; font-weight:500;
-    cursor:pointer; transition:all 140ms ease;
+    cursor:pointer; transition:all var(--motion-fast) var(--motion-curve);
   }
   .action-btn:hover {
     background:rgba(94,231,247,.1);
@@ -2321,7 +2468,7 @@
     width:22px; height:22px; border-radius:50%; font-size:.9rem;
     display:grid; place-items:center; cursor:pointer; padding:0;
     background:rgba(16,28,44,.8); border:1px solid rgba(110,165,200,.18); color:var(--soft);
-    transition:all 120ms; line-height:1;
+    transition:all var(--motion-fast) var(--motion-curve); line-height:1;
   }
   .zoom-btn:hover:not(:disabled) { border-color:rgba(94,231,247,.4); color:var(--accent); background:rgba(94,231,247,.08); }
   .zoom-btn:disabled { opacity:.28; cursor:not-allowed; }
@@ -2360,6 +2507,11 @@
     width:6px; height:6px; border-radius:50%;
     background:var(--ok); box-shadow:0 0 5px rgba(110,232,154,.5);
     animation:nb-pulse 2s ease-in-out infinite; flex-shrink:0;
+    transition:transform var(--motion-fast) var(--motion-curve), box-shadow var(--motion-fast) var(--motion-curve);
+  }
+  .nb-status-dot--flash {
+    transform:scale(1.18);
+    box-shadow:0 0 12px rgba(110,232,154,.65);
   }
   @keyframes nb-pulse { 0%,100%{opacity:.4;transform:scale(.8);} 50%{opacity:1;transform:scale(1.1);} }
   .nb-status-text  { flex:1; min-width:0; font-size:.62rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -2426,6 +2578,7 @@
     background:rgba(3,6,12,.7);
     backdrop-filter:blur(6px);
     display:grid; place-items:center; z-index:50; padding:20px;
+    will-change:opacity;
   }
 
   /* ── Editor modal ────────────────────────────────────────────────── */
@@ -2436,6 +2589,7 @@
     background:linear-gradient(155deg, var(--s3) 0%, var(--s2) 40%, var(--s1) 100%);
     padding:22px; display:flex; flex-direction:column; gap:14px;
     box-shadow:0 40px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.025);
+    will-change:transform, opacity;
   }
   .editor-header {
     display:flex; align-items:center; justify-content:space-between;
@@ -2615,6 +2769,7 @@
     background:linear-gradient(155deg, var(--s3) 0%, var(--s2) 100%);
     box-shadow:0 24px 56px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.025);
     backdrop-filter:blur(20px);
+    will-change:transform, opacity;
   }
   .ctx-title {
     font-size:.74rem; font-weight:600; color:var(--soft);
@@ -2643,6 +2798,7 @@
     padding:16px; display:flex; flex-direction:column; gap:10px;
     box-shadow:0 40px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.025);
     backdrop-filter:blur(24px);
+    will-change:transform, opacity;
   }
   .launcher-search {
     display:flex; align-items:center; gap:10px;
@@ -2663,7 +2819,7 @@
     width:100%; display:flex; align-items:center; gap:10px; text-align:left;
     padding:10px 12px; border-radius:var(--r-sm);
     border:1px solid transparent; background:rgba(6,9,15,.4); color:var(--text);
-    cursor:pointer; transition:all 100ms;
+    cursor:pointer; transition:all var(--motion-fast) var(--motion-curve);
   }
   .launcher-item:hover, .launcher-item--active { background:rgba(94,231,247,.06); border-color:rgba(94,231,247,.16); }
   .launcher-item-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
@@ -2688,6 +2844,13 @@
   :global(*::-webkit-scrollbar-track) { background:transparent; }
   :global(*::-webkit-scrollbar-thumb) { background:rgba(110,165,200,.18); border-radius:2px; }
   :global(*::-webkit-scrollbar-thumb:hover) { background:rgba(110,165,200,.32); }
+
+  @media (prefers-reduced-motion:reduce) {
+    .node-actions,
+    .nb-status-dot {
+      animation:none;
+    }
+  }
 
   /* ── Responsive ──────────────────────────────────────────────────── */
   @media (max-width:980px) {
