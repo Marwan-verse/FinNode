@@ -85,6 +85,27 @@ exe_imports_webview2_loader() {
   return 1
 }
 
+exe_has_windows_resources() {
+  local exe_path="$1"
+
+  if command -v llvm-objdump >/dev/null 2>&1; then
+    if llvm-objdump -h "$exe_path" 2>/dev/null | grep -Eq '(^|[[:space:]])\.rsrc($|[[:space:]])'; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if command -v objdump >/dev/null 2>&1; then
+    if objdump -h "$exe_path" 2>/dev/null | grep -Eq '(^|[[:space:]])\.rsrc($|[[:space:]])'; then
+      return 0
+    fi
+    return 1
+  fi
+
+  # If section inspection tools are unavailable, do not block the build.
+  return 0
+}
+
 ensure_writable_dir() {
   local dir="$1"
   mkdir -p "$dir"
@@ -151,6 +172,10 @@ ensure_msvc_cross_toolchain_linux() {
 
   if ! command -v lld-link >/dev/null 2>&1; then
     missing+=(lld)
+  fi
+
+  if ! command -v llvm-rc >/dev/null 2>&1; then
+    missing+=(llvm)
   fi
 
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -260,10 +285,12 @@ fi
 
 echo "[FinNode] Building Windows executable for $WINDOWS_TARGET_TRIPLE..."
 if [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-gnu ]]; then
+  RC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-windres \
   CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
     CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
     cargo build --release --target "$WINDOWS_TARGET_TRIPLE" --manifest-path src-tauri/Cargo.toml
 elif [[ "$WINDOWS_TARGET_TRIPLE" == *-windows-msvc && "${OSTYPE:-}" == linux* ]]; then
+  RC_x86_64_pc_windows_msvc=llvm-rc \
   CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" \
     cargo xwin build --release --target "$WINDOWS_TARGET_TRIPLE" --manifest-path src-tauri/Cargo.toml
 else
@@ -277,6 +304,18 @@ WINDOWS_DLL_PATH="$WINDOWS_OUTPUT_DIR/WebView2Loader.dll"
 
 if [ ! -f "$WINDOWS_EXE_PATH" ]; then
   echo "[FinNode] Build completed but expected executable was not found at: $WINDOWS_EXE_PATH"
+  exit 1
+fi
+
+if ! exe_has_windows_resources "$WINDOWS_EXE_PATH"; then
+  cat <<EOF
+[FinNode] Build output has no Windows resource section (.rsrc):
+  $WINDOWS_EXE_PATH
+[FinNode] The EXE icon cannot render without embedded resources.
+[FinNode] Try a clean rebuild so build.rs can re-embed src-tauri/icons/icon.ico:
+  CARGO_TARGET_DIR="$WINDOWS_TARGET_DIR" cargo clean --manifest-path src-tauri/Cargo.toml
+  npm run make:windows
+EOF
   exit 1
 fi
 

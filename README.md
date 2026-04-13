@@ -429,12 +429,12 @@ npm run make:windows
 
 Default exported artifacts:
 
-- `artifacts/windows/finnode.exe`
+- `artifacts/windows/FinNode.exe`
 
 Default target behavior:
 
 - Target triple defaults to `x86_64-pc-windows-msvc`
-- MSVC build links the WebView2 loader statically, so `finnode.exe` is exported as a standalone file (no `WebView2Loader.dll` sidecar)
+- MSVC build links the WebView2 loader statically, so `FinNode.exe` is exported as a standalone file (no `WebView2Loader.dll` sidecar)
 - GNU targets require `WebView2Loader.dll` next to the EXE and are blocked by default unless explicitly opted in
 
 Environment variables:
@@ -453,6 +453,10 @@ Environment variables:
 	- override cargo target dir for windows builds
 - `CARGO_TARGET_DIR`:
 	- respected when explicit windows target dir is not set
+- `FINNODE_WINDOWS_EXE_NAME`:
+	- override exported executable basename (example: `MyTool` exports `MyTool.exe`)
+	- optional `.exe` suffix in the variable value is normalized away before export
+	- note: Windows executables still require the `.exe` extension
 
 Notes:
 
