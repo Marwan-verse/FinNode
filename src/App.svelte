@@ -101,8 +101,9 @@
   const BOARD_OPACITY_MIN = 20;
   const BOARD_OPACITY_MAX = 100;
   let boardOpacity = BOARD_OPACITY_MAX;
-  let appSettings = { start_on_boot: true };
+  let appSettings = { start_on_boot: true, run_macro_on_system_start: false };
   let savingStartOnBoot = false;
+  let savingRunMacroOnSystemStart = false;
 
   /* ─── Helpers ────────────────────────────────────────────────────── */
   function zoomIn()  { zoomLevel = Math.min(ZOOM_MAX, parseFloat((zoomLevel + ZOOM_STEP).toFixed(2))); queueRender(); }
@@ -115,7 +116,8 @@
     try {
       const settings = await invoke('get_app_settings');
       appSettings = {
-        start_on_boot: Boolean(settings?.start_on_boot ?? true)
+        start_on_boot: Boolean(settings?.start_on_boot ?? true),
+        run_macro_on_system_start: Boolean(settings?.run_macro_on_system_start ?? false)
       };
     } catch (e) {
       updateStatus(`Failed to load app settings: ${String(e)}`);
@@ -134,6 +136,21 @@
       updateStatus(`Startup setting failed: ${String(e)}`);
     } finally {
       savingStartOnBoot = false;
+    }
+  }
+
+  async function updateRunMacroOnSystemStart(enabled) {
+    const previous = appSettings.run_macro_on_system_start;
+    appSettings = {...appSettings, run_macro_on_system_start: enabled};
+    savingRunMacroOnSystemStart = true;
+    try {
+      await invoke('set_run_macro_on_system_start', { enabled });
+      updateStatus(enabled ? 'System-start macro enabled' : 'System-start macro disabled');
+    } catch (e) {
+      appSettings = {...appSettings, run_macro_on_system_start: previous};
+      updateStatus(`System-start macro setting failed: ${String(e)}`);
+    } finally {
+      savingRunMacroOnSystemStart = false;
     }
   }
 
@@ -1393,15 +1410,26 @@
           <div class="panel-head">
             <h2>Application</h2>
           </div>
-          <label class="setting-row">
-            <span>Start app when the PC starts</span>
-            <input
-              type="checkbox"
-              checked={appSettings.start_on_boot}
-              disabled={savingStartOnBoot}
-              on:change={e=>updateStartOnBoot(e.currentTarget.checked)}
-            />
-          </label>
+          <div class="setting-list">
+            <label class="setting-row">
+              <span>Start app when the PC starts</span>
+              <input
+                type="checkbox"
+                checked={appSettings.start_on_boot}
+                disabled={savingStartOnBoot}
+                on:change={e=>updateStartOnBoot(e.currentTarget.checked)}
+              />
+            </label>
+            <label class="setting-row">
+              <span>Run main node macro on system start</span>
+              <input
+                type="checkbox"
+                checked={appSettings.run_macro_on_system_start}
+                disabled={savingRunMacroOnSystemStart}
+                on:change={e=>updateRunMacroOnSystemStart(e.currentTarget.checked)}
+              />
+            </label>
+          </div>
         </section>
 
         <!-- Workspaces -->
@@ -1867,6 +1895,11 @@
     background:rgba(6,9,15,.45);
     font-size:.78rem;
     color:var(--text);
+  }
+  .setting-list {
+    display:flex;
+    flex-direction:column;
+    gap:8px;
   }
   .setting-row input[type=checkbox] {
     width:16px;

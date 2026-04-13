@@ -19,6 +19,7 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutoStartManagerExt};
 
 static APP_INSTANCE_LOCK: OnceLock<File> = OnceLock::new();
+const MAIN_NODE_ID: &str = "main-node";
 
 // ── Win32 FFI ────────────────────────────────────────────────────────────────
 
@@ -182,16 +183,20 @@ struct SavedWindowState {
 struct AppSettings {
     #[serde(default = "default_start_on_boot")]
     start_on_boot: bool,
+    #[serde(default = "default_run_macro_on_system_start")]
+    run_macro_on_system_start: bool,
     #[serde(default)]
     desktop_window: Option<SavedWindowState>,
 }
 
 fn default_start_on_boot() -> bool { true }
+fn default_run_macro_on_system_start() -> bool { false }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             start_on_boot: true,
+            run_macro_on_system_start: false,
             desktop_window: None,
         }
     }
@@ -200,6 +205,7 @@ impl Default for AppSettings {
 #[derive(Debug, Clone, Serialize)]
 struct FrontendAppSettings {
     start_on_boot: bool,
+    run_macro_on_system_start: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +274,7 @@ fn get_app_settings(state: State<'_, AppState>) -> Result<FrontendAppSettings, S
     let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
     Ok(FrontendAppSettings {
         start_on_boot: cache.settings.start_on_boot,
+        run_macro_on_system_start: cache.settings.run_macro_on_system_start,
     })
 }
 
@@ -280,6 +287,17 @@ fn set_start_on_boot(
     apply_start_on_boot(&app, enabled)?;
     let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
     cache.settings.start_on_boot = enabled;
+    write_layout(&state.layout_path, &cache)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_run_macro_on_system_start(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    cache.settings.run_macro_on_system_start = enabled;
     write_layout(&state.layout_path, &cache)?;
     Ok(())
 }
@@ -372,7 +390,24 @@ fn run_node_macro(
         return Err("No uploaded script configured for this node".into());
     }
 
-    let app_for_thread = app.clone();
+    execute_macro_steps(
+        app.clone(),
+        steps,
+        uploaded_script_path,
+        working_dir,
+        should_restore_desktop_after_macro,
+    );
+    Ok(())
+}
+
+fn execute_macro_steps(
+    app: AppHandle,
+    steps: Vec<MacroStep>,
+    uploaded_script_path: Option<String>,
+    working_dir: Option<String>,
+    should_restore_desktop_after_macro: bool,
+) {
+    let app_for_thread = app;
     thread::spawn(move || {
         for step in &steps {
             match step.action.as_str() {
@@ -407,7 +442,25 @@ fn run_node_macro(
             set_window_bottom(app_for_thread.clone());
         }
     });
-    Ok(())
+}
+
+fn launched_via_system_start() -> bool {
+    std::env::args().any(|arg| arg == "--autostart")
+}
+
+fn startup_macro_payload(layout: &AppLayout) -> Option<(Vec<MacroStep>, Option<String>, Option<String>)> {
+    let workspace = layout
+        .workspaces
+        .iter()
+        .find(|ws| ws.id == layout.active_workspace)?;
+    let startup_node = workspace.nodes.iter().find(|node| node.id == MAIN_NODE_ID)?;
+    if startup_node.macros.is_empty() {
+        return None;
+    }
+
+    let uploaded_script_path = normalize_optional_owned(startup_node.uploaded_script_path.clone());
+    let working_dir = normalize_optional_owned(startup_node.targets.path.clone());
+    Some((startup_node.macros.clone(), uploaded_script_path, working_dir))
 }
 
 #[tauri::command]
@@ -1957,7 +2010,10 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         .system_tray(build_system_tray())
         .manage(create_state())
         .on_system_tray_event(|app, event| match event {
@@ -2041,6 +2097,12 @@ fn main() {
             let state = app.state::<AppState>();
             let layout = read_layout(&state.layout_path).unwrap_or_default();
             let startup_enabled = layout.settings.start_on_boot;
+            let run_macro_on_system_start_enabled = layout.settings.run_macro_on_system_start;
+            let system_start_macro = if run_macro_on_system_start_enabled && launched_via_system_start() {
+                startup_macro_payload(&layout)
+            } else {
+                None
+            };
             let _ = write_layout(&state.layout_path, &layout);
             *state.cached_layout.lock().expect("cache") = layout;
 
@@ -2084,11 +2146,27 @@ fn main() {
 
             let _ = window.show();
 
+            if let Some((steps, uploaded_script_path, working_dir)) = system_start_macro {
+                let should_restore_desktop_after_macro = {
+                    let stealth = state.stealth.lock().map(|v| *v).unwrap_or(false);
+                    let desktop_visible = state.desktop_visible.lock().map(|v| *v).unwrap_or(false);
+                    desktop_visible && !stealth
+                };
+
+                execute_macro_steps(
+                    app_handle.clone(),
+                    steps,
+                    uploaded_script_path,
+                    working_dir,
+                    should_restore_desktop_after_macro,
+                );
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             load_layout, save_layout, launch_node, run_node_macro, save_uploaded_script,
-            get_app_settings, set_start_on_boot,
+            get_app_settings, set_start_on_boot, set_run_macro_on_system_start,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
             update_node_bounds,
             get_platform,
