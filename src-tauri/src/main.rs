@@ -779,7 +779,6 @@ fn set_window_bottom(app: tauri::AppHandle) {
         #[cfg(target_os = "linux")]
         {
             use gtk::prelude::GtkWindowExt;
-            use tauri::WindowExtUnix;
 
             match win.gtk_window() {
                 Ok(gtk_window) => {
