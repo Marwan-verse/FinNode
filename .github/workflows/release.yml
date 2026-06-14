@@ -74,6 +74,23 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # The Linux/macOS bundlers run image::open() over EVERY bundle.icon entry;
+      # they choke on the .ico/.icns ("Failed to create icon files"). Those
+      # platforms only need PNGs — strip the rest here. Windows keeps the .ico.
+      - name: Use PNG-only icons on Linux/macOS
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          p = "src-tauri/tauri.conf.json"
+          c = json.load(open(p))
+          icons = [i for i in c["tauri"]["bundle"]["icon"] if i.lower().endswith(".png")]
+          c["tauri"]["bundle"]["icon"] = icons
+          json.dump(c, open(p, "w"), indent=2)
+          print("bundle.icon ->", icons)
+          PY
+
       - name: Build and publish release
         id: tauri
         uses: tauri-apps/tauri-action@v0
