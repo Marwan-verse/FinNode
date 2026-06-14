@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     strategy:
@@ -20,12 +24,12 @@ jobs:
           # macos-13 (Ventura) — Tauri v1's bundler is unreliable on the
           # macos-latest (15) image's icon/codesign tooling.
           - platform: macos-13
-            args: "--target universal-apple-darwin"
+            args: "--target universal-apple-darwin --verbose"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
           # Build only the AppImage on Linux (the .deb bundler step fails on the
           # runner, and the website links to the AppImage anyway).
           - platform: ubuntu-22.04
-            args: "--bundles appimage"
+            args: "--bundles appimage --verbose"
             rust-targets: ""
           - platform: windows-latest
             args: ""
