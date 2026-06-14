@@ -140,12 +140,37 @@ struct ProjectNode {
     collapsed: bool,
     #[serde(default)]
     last_launched: Option<String>,
+    #[serde(default)]
+    launch_count: u64,
+}
+
+/// A visual cluster of nodes on the board. Group membership is stored on each
+/// node via `ProjectNode::group` (matching this id); this struct holds the
+/// presentation metadata (label, color, collapsed state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeGroup {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    collapsed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct UploadedScriptInfo {
     path: String,
     name: String,
+}
+
+/// Portable single-workspace export envelope written to `exports/*.finnode.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkspaceExport {
+    format: String,
+    version: u32,
+    exported_at: String,
+    workspace: Workspace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +184,8 @@ struct Workspace {
     pan_x: f64,
     #[serde(default)]
     pan_y: f64,
+    #[serde(default)]
+    groups: Vec<NodeGroup>,
 }
 
 fn default_zoom() -> f64 { 1.0 }
@@ -189,10 +216,16 @@ struct AppSettings {
     run_macro_on_system_start: bool,
     #[serde(default)]
     desktop_window: Option<SavedWindowState>,
+    #[serde(default = "default_theme")]
+    theme: String,
+    #[serde(default = "default_board_background")]
+    board_background: String,
 }
 
 fn default_start_on_boot() -> bool { true }
 fn default_run_macro_on_system_start() -> bool { false }
+fn default_theme() -> String { "cyan".into() }
+fn default_board_background() -> String { "dots".into() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -200,6 +233,8 @@ impl Default for AppSettings {
             start_on_boot: true,
             run_macro_on_system_start: false,
             desktop_window: None,
+            theme: default_theme(),
+            board_background: default_board_background(),
         }
     }
 }
@@ -208,6 +243,8 @@ impl Default for AppSettings {
 struct FrontendAppSettings {
     start_on_boot: bool,
     run_macro_on_system_start: bool,
+    theme: String,
+    board_background: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,9 +301,13 @@ fn load_layout(state: State<'_, AppState>) -> Result<AppLayout, String> {
 }
 
 #[tauri::command]
-fn save_layout(state: State<'_, AppState>, layout: AppLayout) -> Result<(), String> {
-    write_layout(&state.layout_path, &layout)?;
+fn save_layout(state: State<'_, AppState>, mut layout: AppLayout) -> Result<(), String> {
     let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    // The frontend owns workspaces/active/history but not app settings, which are
+    // mutated through dedicated commands. Preserve the authoritative cached
+    // settings so a routine layout save can never clobber them with defaults.
+    layout.settings = cache.settings.clone();
+    write_layout(&state.layout_path, &layout)?;
     *cache = layout;
     Ok(())
 }
@@ -277,7 +318,26 @@ fn get_app_settings(state: State<'_, AppState>) -> Result<FrontendAppSettings, S
     Ok(FrontendAppSettings {
         start_on_boot: cache.settings.start_on_boot,
         run_macro_on_system_start: cache.settings.run_macro_on_system_start,
+        theme: cache.settings.theme.clone(),
+        board_background: cache.settings.board_background.clone(),
     })
+}
+
+#[tauri::command]
+fn set_ui_preferences(
+    state: State<'_, AppState>,
+    theme: Option<String>,
+    board_background: Option<String>,
+) -> Result<(), String> {
+    let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    if let Some(theme) = normalize_optional_owned(theme) {
+        cache.settings.theme = theme;
+    }
+    if let Some(bg) = normalize_optional_owned(board_background) {
+        cache.settings.board_background = bg;
+    }
+    write_layout(&state.layout_path, &cache)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -498,6 +558,48 @@ fn save_uploaded_script(
     })
 }
 
+/// Serialize a single workspace to a portable `.finnode.json` file under the
+/// config `exports/` directory, then reveal it in the OS file manager. Returns
+/// the absolute path of the written file so the frontend can surface it.
+#[tauri::command]
+fn export_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<String, String> {
+    let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
+    let workspace = cache
+        .workspaces
+        .iter()
+        .find(|ws| ws.id == workspace_id)
+        .ok_or("workspace not found")?
+        .clone();
+    drop(cache);
+
+    let parent = state
+        .layout_path
+        .parent()
+        .ok_or("unable to resolve config directory")?;
+    let exports_dir = parent.join("exports");
+    fs::create_dir_all(&exports_dir).map_err(|e| e.to_string())?;
+
+    let bundle = WorkspaceExport {
+        format: "finnode-workspace".into(),
+        version: 1,
+        exported_at: chrono_now(),
+        workspace,
+    };
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+
+    let base = sanitize_file_name(&bundle.workspace.name);
+    let base = if base.trim().is_empty() { "workspace".to_string() } else { base };
+    let stamp = file_stamp();
+    let file_name = format!("{base}-{stamp}.finnode.json");
+    let export_path = exports_dir.join(&file_name);
+    fs::write(&export_path, json.as_bytes()).map_err(|e| e.to_string())?;
+
+    // Best-effort reveal of the exports folder; failure here is non-fatal.
+    let _ = open_target(&exports_dir.to_string_lossy());
+
+    Ok(export_path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn get_command_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
     let cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
@@ -527,6 +629,7 @@ fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Workspac
         zoom: 1.0,
         pan_x: 0.0,
         pan_y: 0.0,
+        groups: vec![],
     };
     let mut cache = state.cached_layout.lock().map_err(|_| "lock poisoned")?;
     cache.workspaces.push(ws.clone());
@@ -1097,6 +1200,7 @@ fn read_layout(path: &Path) -> Result<AppLayout, String> {
                 zoom: 1.0,
                 pan_x: 0.0,
                 pan_y: 0.0,
+                groups: vec![],
             }],
             command_history: vec![],
             settings: AppSettings::default(),
@@ -1124,6 +1228,7 @@ fn default_workspace() -> Workspace {
         zoom: 1.0,
         pan_x: 0.0,
         pan_y: 0.0,
+        groups: vec![],
     }
 }
 
@@ -1142,7 +1247,7 @@ fn default_nodes() -> Vec<ProjectNode> {
             uploaded_script_path: None,
             uploaded_script_name: None,
             color: None, group: None, macros: vec![], run_macro_on_system_start: false,
-            collapsed: false, last_launched: None,
+            collapsed: false, last_launched: None, launch_count: 0,
         },
         ProjectNode {
             id: "tool-spine".into(), name: "Tool Spine".into(), icon: "◈".into(),
@@ -1157,7 +1262,7 @@ fn default_nodes() -> Vec<ProjectNode> {
             uploaded_script_path: None,
             uploaded_script_name: None,
             color: None, group: None, macros: vec![], run_macro_on_system_start: false,
-            collapsed: false, last_launched: None,
+            collapsed: false, last_launched: None, launch_count: 0,
         },
         ProjectNode {
             id: "research-fin".into(), name: "Research Fin".into(), icon: "⬡".into(),
@@ -1172,7 +1277,7 @@ fn default_nodes() -> Vec<ProjectNode> {
             uploaded_script_path: None,
             uploaded_script_name: None,
             color: None, group: None, macros: vec![], run_macro_on_system_start: false,
-            collapsed: false, last_launched: None,
+            collapsed: false, last_launched: None, launch_count: 0,
         },
         ProjectNode {
             id: "signal-drift".into(), name: "Signal Drift".into(), icon: "⟁".into(),
@@ -1186,7 +1291,7 @@ fn default_nodes() -> Vec<ProjectNode> {
             uploaded_script_path: None,
             uploaded_script_name: None,
             color: None, group: None, macros: vec![], run_macro_on_system_start: false,
-            collapsed: false, last_launched: None,
+            collapsed: false, last_launched: None, launch_count: 0,
         },
     ]
 }
@@ -1247,6 +1352,14 @@ fn rand_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     format!("{:x}", n)
+}
+
+/// Monotonic, filename-safe stamp (epoch seconds) used to keep exported
+/// workspace files unique without pulling in a date-formatting crate.
+fn file_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    format!("{secs}")
 }
 
 fn chrono_now() -> String {
@@ -2171,13 +2284,14 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             load_layout, save_layout, launch_node, run_node_macro, save_uploaded_script,
-            get_app_settings, set_start_on_boot, set_run_macro_on_system_start,
+            get_app_settings, set_start_on_boot, set_run_macro_on_system_start, set_ui_preferences,
             set_stealth_mode, set_desktop_visibility, set_desktop_click_through,
             update_node_bounds,
             get_platform,
             hide_main_window, show_main_window, show_settings_view, exit_app,
             pin_desktop_bottom, set_window_bottom,
             list_workspaces, create_workspace, switch_workspace, delete_workspace, rename_workspace,
+            export_workspace,
             get_command_history, clear_command_history
         ])
         .run(tauri::generate_context!())

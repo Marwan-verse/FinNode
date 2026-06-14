@@ -1,0 +1,120 @@
+name: Release
+
+# Builds FinNode for Windows, macOS (universal) and Linux on native runners
+# and publishes the installers to a GitHub Release. Trigger by pushing a tag
+# like `v0.2.0`, or run manually from the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup2.4-dev \
+            patchelf \
+            libfuse2 \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build and publish release
+        id: tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "FinNode ${{ github.ref_name }}"
+          releaseBody: |
+            Desktop builds of FinNode. Download the file for your platform below.
+
+            - **Windows** — `.msi` installer
+            - **macOS** — `.dmg` (universal: Apple Silicon + Intel; unsigned, so first launch use right-click → Open)
+            - **Linux** — `.AppImage` (chmod +x, then run) or `.deb`
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Publish stable, version-independent filenames so the website can link
+      # directly (https://github.com/.../releases/latest/download/<name>).
+      - name: Add stable-named asset (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          APP=$(find src-tauri/target -name '*.AppImage' | head -1)
+          cp "$APP" "FinNode-Linux-x86_64.AppImage"
+          gh release upload "${{ github.ref_name }}" "FinNode-Linux-x86_64.AppImage" --clobber
+
+      - name: Add stable-named asset (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          DMG=$(find src-tauri/target -name '*.dmg' | head -1)
+          cp "$DMG" "FinNode-macOS-universal.dmg"
+          gh release upload "${{ github.ref_name }}" "FinNode-macOS-universal.dmg" --clobber
+
+      - name: Add stable-named asset (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $msi = Get-ChildItem -Recurse -Path src-tauri/target -Filter *.msi | Select-Object -First 1
+          Copy-Item $msi.FullName "FinNode-Windows-x64.msi"
+          gh release upload "${{ github.ref_name }}" "FinNode-Windows-x64.msi" --clobber

@@ -27,6 +27,7 @@
         "sidecar": false
       },
       "path":     { "all": true },
+      "clipboard": { "all": true },
       "fs":       { "all": true, "scope": ["$APPDATA/*", "$HOME/*"] },
       "protocol": { "asset": true, "assetScope": ["**"] }
     },

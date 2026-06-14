@@ -1,10 +1,17 @@
 <script>
   import { onMount, tick } from 'svelte';
   import { fade, fly, scale } from 'svelte/transition';
-  import { invoke } from '@tauri-apps/api/tauri';
-  import { listen } from '@tauri-apps/api/event';
+  import { invoke as tauriInvoke } from '@tauri-apps/api/tauri';
+  import { listen as tauriListen } from '@tauri-apps/api/event';
   import { appWindow } from '@tauri-apps/api/window';
+  import { readText as readClipboardText } from '@tauri-apps/api/clipboard';
+  import { HAS_TAURI, previewInvoke, previewListen } from './preview-mock.js';
   import appLogo from '../src-tauri/icons/icon.png';
+
+  // Use the real Tauri IPC inside the desktop shell; fall back to an in-memory
+  // bridge when the frontend is served as a plain web page (preview/dev).
+  const invoke = HAS_TAURI ? tauriInvoke : previewInvoke;
+  const listen = HAS_TAURI ? tauriListen : previewListen;
 
   const MAIN_NODE_ID   = 'main-node';
   const MAIN_NODE_NAME = 'main';
@@ -18,9 +25,30 @@
 
   const NODE_COLORS    = ['slate', 'cyan', 'green', 'amber', 'rose', 'violet'];
   const NODE_TYPES     = ['default', 'script'];
-  const MACRO_ACTIONS  = ['run-script', 'run-uploaded-script', 'type-text', 'keyboard-shortcut', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
+  const MACRO_ACTIONS  = ['run-script', 'run-uploaded-script', 'type-text', 'keyboard-shortcut', 'prompt-input', 'open-path', 'open-editor', 'open-browser', 'delay', 'open-application'];
+
+  /* Appearance: runtime themes recolor the cyan accent system. Each theme maps
+     to the CSS custom properties consumed across the board + settings UI. */
+  const THEMES = {
+    cyan:    { label: 'Cyan',    accent: '#5ee7f7', accent2: '#b09eff', glow: 'rgba(94,231,247,.22)' },
+    violet:  { label: 'Violet',  accent: '#c4a8ff', accent2: '#6ee8ff', glow: 'rgba(196,168,255,.24)' },
+    emerald: { label: 'Emerald', accent: '#6ee89a', accent2: '#5ee7f7', glow: 'rgba(110,232,154,.22)' },
+    amber:   { label: 'Amber',   accent: '#fdd87a', accent2: '#ff9f7a', glow: 'rgba(253,216,122,.22)' },
+    rose:    { label: 'Rose',    accent: '#ff8fa8', accent2: '#c4a8ff', glow: 'rgba(255,143,168,.24)' },
+    mono:    { label: 'Mono',    accent: '#aebfce', accent2: '#8fa3b5', glow: 'rgba(174,191,206,.20)' }
+  };
+  const THEME_IDS = Object.keys(THEMES);
+  const BOARD_BACKGROUNDS = [
+    { id: 'dots',   label: 'Dots'   },
+    { id: 'grid',   label: 'Grid'   },
+    { id: 'aurora', label: 'Aurora' },
+    { id: 'void',   label: 'Void'   }
+  ];
+  const BOARD_BACKGROUND_IDS = BOARD_BACKGROUNDS.map(b => b.id);
+  const GROUP_NONE = '';
   const SHORTCUT_MODIFIER_ORDER = ['Ctrl', 'Alt', 'Shift', 'Meta'];
   const SHORTCUT_RECORD_IDLE_MS = 1400;
+  const EMPTY_SET = new Set();
   const NODE_COLOR_MAP = {
     slate:  '#8fa3b5',
     cyan:   '#5ee7f7',
@@ -102,11 +130,24 @@
   const BOARD_OPACITY_MIN = 20;
   const BOARD_OPACITY_MAX = 100;
   let boardOpacity = BOARD_OPACITY_MAX;
-  let appSettings = { start_on_boot: true };
+  let appSettings = { start_on_boot: true, theme: 'cyan', board_background: 'dots' };
   let savingStartOnBoot = false;
+
+  // Groups (per-workspace clusters). `groups` mirrors the active workspace's
+  // group metadata the same way `nodes` mirrors its node list.
+  let groups = [];
+
+  // Drag-drop-to-create state.
+  let isDropActive = false;
+  let dropDepth = 0;
+
+  // Macro prompt-input dialog state. `promptResolver` resolves the awaiting macro.
+  let promptDialog = { open: false, label: '', value: '' };
+  let promptResolver = null;
   let prefersReducedMotion = false;
   let reducedMotionQuery = null;
   let reducedMotionListener = null;
+  let showcaseMode = false;
   let statusFlash = false;
   let statusVersion = 0;
   let statusFlashTimer = null;
@@ -124,11 +165,51 @@
     try {
       const settings = await invoke('get_app_settings');
       appSettings = {
-        start_on_boot: Boolean(settings?.start_on_boot ?? true)
+        start_on_boot: Boolean(settings?.start_on_boot ?? true),
+        theme: THEME_IDS.includes(settings?.theme) ? settings.theme : 'cyan',
+        board_background: BOARD_BACKGROUND_IDS.includes(settings?.board_background) ? settings.board_background : 'dots'
       };
+      applyAppearance();
     } catch (e) {
       updateStatus(`Failed to load app settings: ${String(e)}`);
     }
+  }
+
+  /* ─── Appearance / themes ────────────────────────────────────────── */
+  function applyAppearance() {
+    if (typeof document === 'undefined') return;
+    const theme = THEMES[appSettings.theme] || THEMES.cyan;
+    const root = document.documentElement.style;
+    root.setProperty('--accent', theme.accent);
+    root.setProperty('--accent2', theme.accent2);
+    root.setProperty('--accent-glow', theme.glow);
+  }
+  async function persistUiPreferences() {
+    try {
+      await invoke('set_ui_preferences', {
+        theme: appSettings.theme,
+        boardBackground: appSettings.board_background
+      });
+    } catch (e) {
+      updateStatus(`Appearance save failed: ${String(e)}`);
+    }
+  }
+  function setTheme(themeId) {
+    if (!THEME_IDS.includes(themeId)) return;
+    appSettings = {...appSettings, theme:themeId};
+    applyAppearance();
+    void persistUiPreferences();
+    updateStatus(`Theme: ${THEMES[themeId].label}`);
+  }
+  function cycleTheme() {
+    const idx = THEME_IDS.indexOf(appSettings.theme);
+    setTheme(THEME_IDS[(idx + 1) % THEME_IDS.length]);
+  }
+  function setBoardBackground(bgId) {
+    if (!BOARD_BACKGROUND_IDS.includes(bgId)) return;
+    appSettings = {...appSettings, board_background:bgId};
+    void persistUiPreferences();
+    updateStatus(`Board background: ${bgId}`);
   }
 
   async function updateStartOnBoot(enabled) {
@@ -167,7 +248,7 @@
     return {
       name:'', icon:'', description:'',
       path:'', editor:'', browser:'', script:'',
-      color:'slate', node_type:'default',
+      color:'slate', node_type:'default', group:'',
       uploaded_script_path:'', uploaded_script_name:'',
       run_macro_on_system_start:false
     };
@@ -366,7 +447,7 @@
     return {action, value};
   }
   function macroActionNeedsValue(action) {
-    return action !== 'delay' && action !== 'run-uploaded-script';
+    return action !== 'delay' && action !== 'run-uploaded-script' && action !== 'prompt-input';
   }
   function normalizeMacroSteps(steps) {
     return (Array.isArray(steps) ? steps : [])
@@ -378,6 +459,7 @@
     if (action === 'run-uploaded-script') return 'Run uploaded script';
     if (action === 'type-text') return 'Type text';
     if (action === 'keyboard-shortcut') return 'Keyboard shortcut';
+    if (action === 'prompt-input') return 'Prompt for input';
     if (action === 'open-path') return 'Open path';
     if (action === 'open-editor') return 'Open editor';
     if (action === 'open-browser') return 'Open browser';
@@ -390,6 +472,7 @@
     if (action === 'run-uploaded-script') return 'Uses this node uploaded script file';
     if (action === 'type-text') return 'hello world';
     if (action === 'keyboard-shortcut') return 'Ctrl+Shift+P, Ctrl+K';
+    if (action === 'prompt-input') return 'Label, e.g. Branch name';
     if (action === 'open-path') return '/path/to/project';
     if (action === 'open-editor') return 'code /path/to/project';
     if (action === 'open-browser') return 'https://example.com';
@@ -419,15 +502,15 @@
     return { id:MAIN_NODE_ID, name:MAIN_NODE_NAME, icon:LOGO_ICON, description:'Core entry node', x, y,
              links:[], targets:{path:null,editor:null,browser:null,script:null},
              node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
-             run_macro_on_system_start:false,
-             color:'cyan', macros:[], locked:true, last_launched:null };
+             run_macro_on_system_start:false, group:GROUP_NONE,
+             color:'cyan', macros:[], locked:true, last_launched:null, launch_count:0 };
   }
   function createEmptyNode(x, y) {
     return { id:uid('node'), name:'', icon:'', description:'', x, y,
              links:[], targets:{path:null,editor:null,browser:null,script:null},
              node_type:'default', uploaded_script_path:null, uploaded_script_name:null,
-             run_macro_on_system_start:false,
-             color:'slate', macros:[], locked:false, last_launched:null };
+             run_macro_on_system_start:false, group:GROUP_NONE,
+             color:'slate', macros:[], locked:false, last_launched:null, launch_count:0 };
   }
   function normalizeNode(raw, index=0) {
     const t = raw?.targets ?? {};
@@ -446,10 +529,12 @@
       uploaded_script_path: normalizeOptionalString(raw?.uploaded_script_path),
       uploaded_script_name: normalizeOptionalString(raw?.uploaded_script_name),
       run_macro_on_system_start: nodeId===MAIN_NODE_ID ? false : Boolean(raw?.run_macro_on_system_start),
+      group:       typeof raw?.group==='string' ? raw.group : GROUP_NONE,
       color:       NODE_COLORS.includes(raw?.color) ? raw.color : 'slate',
       macros:      normalizeMacroSteps(raw?.macros),
       locked:      Boolean(raw?.locked),
-      last_launched: typeof raw?.last_launched==='string' ? raw.last_launched : null
+      last_launched: typeof raw?.last_launched==='string' ? raw.last_launched : null,
+      launch_count: Number.isFinite(Number(raw?.launch_count)) ? Math.max(0, Math.floor(Number(raw.launch_count))) : 0
     };
   }
   function ensureMainNode(list) {
@@ -465,14 +550,37 @@
     return {nodes:[createMainNode(normalized[0]),...normalized], changed:true};
   }
   function createDefaultWorkspace() {
-    return { id:'default', name:'Default', nodes:[createMainNode(null)], zoom:1, pan_x:0, pan_y:0 };
+    return { id:'default', name:'Default', nodes:[createMainNode(null)], zoom:1, pan_x:0, pan_y:0, groups:[] };
+  }
+  function normalizeGroup(raw) {
+    const name = typeof raw?.name==='string' ? raw.name.trim() : '';
+    const id   = typeof raw?.id==='string' && raw.id ? raw.id : (name || uid('grp'));
+    return {
+      id,
+      name: name || id,
+      color: NODE_COLORS.includes(raw?.color) ? raw.color : 'cyan',
+      collapsed: Boolean(raw?.collapsed)
+    };
+  }
+  function normalizeGroups(rawGroups, nodeList) {
+    const used = new Set((nodeList||[]).map(n=>n.group).filter(Boolean));
+    const seen = new Set();
+    const list = (Array.isArray(rawGroups) ? rawGroups : [])
+      .map(normalizeGroup)
+      .filter(g => { if (seen.has(g.id)) return false; seen.add(g.id); return true; });
+    // Auto-create group metadata for any group referenced by a node but missing.
+    for (const id of used) {
+      if (!seen.has(id)) { list.push(normalizeGroup({id, name:id})); seen.add(id); }
+    }
+    // Drop empty groups that no node references.
+    return list.filter(g => used.has(g.id));
   }
   function normalizeWorkspace(raw, index) {
     const id   = typeof raw?.id==='string' && raw.id ? raw.id : `ws-${index+1}`;
     const name = typeof raw?.name==='string' && raw.name.trim() ? raw.name.trim() : `Workspace ${index+1}`;
     const nodeList = Array.isArray(raw?.nodes) ? raw.nodes.map((n,i)=>normalizeNode(n,i)) : [];
     const ensured  = ensureMainNode(nodeList);
-    return { id, name, nodes:ensured.nodes, zoom:1, pan_x:0, pan_y:0 };
+    return { id, name, nodes:ensured.nodes, zoom:1, pan_x:0, pan_y:0, groups:normalizeGroups(raw?.groups, ensured.nodes) };
   }
   function normalizeWorkspaces(rawList) {
     if (!Array.isArray(rawList)||rawList.length===0) return [createDefaultWorkspace()];
@@ -527,9 +635,10 @@
 
   /* ─── Workspace CRUD ─────────────────────────────────────────────── */
   function updateActiveWorkspaceNodes(nextNodes) {
-    workspaces = workspaces.map(ws => ws.id!==activeWorkspaceId ? ws : {...ws, nodes:nextNodes});
+    workspaces = workspaces.map(ws => ws.id!==activeWorkspaceId ? ws : {...ws, nodes:nextNodes, groups});
   }
   async function persistLayout() {
+    groups = normalizeGroups(groups, nodes);
     updateActiveWorkspaceNodes(nodes);
     await invoke('save_layout', {layout:{active_workspace:activeWorkspaceId, workspaces, command_history:commandHistoryCache}});
   }
@@ -553,6 +662,7 @@
     activeWorkspaceId = nextActive;
     const ws = workspaces.find(ws=>ws.id===activeWorkspaceId) ?? workspaces[0];
     nodes = ws.nodes;
+    groups = normalizeGroups(ws.groups, ws.nodes);
     syncSmooth(true);
     void tick().then(()=>{ clampAllNodesToCanvas(false); queueRender(); });
   }
@@ -604,7 +714,123 @@
     } catch(e) { updateStatus(String(e)); }
   }
 
+  /* ─── Import / Export ────────────────────────────────────────────── */
+  async function exportWorkspace() {
+    try {
+      await flushPendingSave();
+      const path = await invoke('export_workspace', {workspaceId:activeWorkspaceId});
+      updateStatus(`Exported → ${path}`);
+    } catch(e) { updateStatus(`Export failed: ${String(e)}`); }
+  }
+  function triggerImportWorkspace() {
+    document.getElementById('workspace-import-input')?.click();
+  }
+  async function handleWorkspaceImport(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      // Accept either the export envelope { workspace: {...} } or a bare workspace.
+      const rawWs = parsed?.workspace ?? parsed;
+      if (!rawWs || !Array.isArray(rawWs.nodes)) {
+        updateStatus('Import failed: not a FinNode workspace');
+        return;
+      }
+      await flushPendingSave();
+      const baseName = (typeof rawWs.name==='string' && rawWs.name.trim()) ? rawWs.name.trim() : 'Imported';
+      const existingNames = new Set(workspaces.map(w=>w.name));
+      let name = baseName, n = 2;
+      while (existingNames.has(name)) name = `${baseName} (${n++})`;
+      const imported = normalizeWorkspace({...rawWs, id:uid('ws'), name}, workspaces.length);
+      workspaces = [...workspaces, imported];
+      await invoke('save_layout', {layout:{active_workspace:activeWorkspaceId, workspaces, command_history:commandHistoryCache}});
+      await switchWorkspace(imported.id);
+      updateStatus(`Imported "${name}" (${imported.nodes.length} nodes)`);
+    } catch(e) {
+      updateStatus(`Import failed: ${String(e)}`);
+    }
+  }
+
+  /* ─── Macro variables ────────────────────────────────────────────── */
+  // Tokens usable in macro step values. Resolved on the frontend (where the
+  // clipboard + a prompt dialog are available) before steps are sent to Rust.
+  function substituteTokens(value, ctx) {
+    if (typeof value !== 'string' || value.indexOf('{{') === -1) return value;
+    return value.replace(/\{\{\s*([a-zA-Z]+)(?::([^}]*))?\s*\}\}/g, (match, name, arg) => {
+      const key = name.toLowerCase();
+      if (key === 'clipboard') return ctx.clipboard;
+      if (key === 'date') return ctx.date;
+      if (key === 'time') return ctx.time;
+      if (key === 'datetime') return ctx.datetime;
+      if (key === 'input') {
+        if (arg !== undefined) return ctx.inputs[arg.trim().toLowerCase()] ?? '';
+        return ctx.lastInput;
+      }
+      return match;
+    });
+  }
+  function macroUsesToken(steps, token) {
+    return steps.some(s => typeof s.value === 'string' && s.value.toLowerCase().includes(token));
+  }
+  // Resolve prompt-input steps + token substitution. Returns the executable
+  // step list, or null if the user cancelled a prompt (aborting the macro).
+  async function resolveMacroSteps(steps) {
+    const ctx = { date:'', time:'', datetime:'', clipboard:'', inputs:{}, lastInput:'' };
+    const now = new Date();
+    ctx.date = now.toLocaleDateString();
+    ctx.time = now.toLocaleTimeString();
+    ctx.datetime = now.toLocaleString();
+    if (macroUsesToken(steps, '{{clipboard}}')) {
+      try { ctx.clipboard = (await readClipboardText()) ?? ''; }
+      catch (_) { ctx.clipboard = ''; }
+    }
+    const resolved = [];
+    for (const step of steps) {
+      if (step.action === 'prompt-input') {
+        const label = (step.value || '').trim() || 'Enter value';
+        const answer = await openPromptDialog(label);
+        if (answer === null) return null; // cancelled → abort macro
+        ctx.lastInput = answer;
+        ctx.inputs[label.toLowerCase()] = answer;
+        continue; // prompt steps are frontend-only
+      }
+      resolved.push({ ...step, value: substituteTokens(step.value, ctx) });
+    }
+    return resolved;
+  }
+  function openPromptDialog(label) {
+    return new Promise(resolve => {
+      promptResolver = resolve;
+      promptDialog = { open:true, label, value:'' };
+      void tick().then(() => document.getElementById('macro-prompt-input')?.focus());
+    });
+  }
+  function resolvePromptDialog(value) {
+    const resolver = promptResolver;
+    promptResolver = null;
+    promptDialog = { open:false, label:'', value:'' };
+    if (resolver) resolver(value);
+  }
+  function confirmPromptDialog() { resolvePromptDialog(promptDialog.value); }
+  function cancelPromptDialog()  { resolvePromptDialog(null); }
+  function promptDialogKey(event) {
+    if (event.key === 'Enter')  { event.preventDefault(); confirmPromptDialog(); }
+    if (event.key === 'Escape') { event.preventDefault(); cancelPromptDialog(); }
+  }
+
   /* ─── Node actions ───────────────────────────────────────────────── */
+  function registerLaunch(nodeId) {
+    nodes = nodes.map(n => n.id!==nodeId ? n : {
+      ...n,
+      last_launched: new Date().toISOString(),
+      launch_count: (Number(n.launch_count) || 0) + 1
+    });
+    queueRender();
+    scheduleSave();
+  }
   async function launchNode(node, action) {
     try {
       if (action === 'run-macro') {
@@ -614,7 +840,12 @@
           return;
         }
 
-        if (!isNodeBoardWindow && steps.some(step => step.action==='type-text' || step.action==='keyboard-shortcut')) {
+        // Collect any prompt input + resolve tokens while the window is visible.
+        const resolvedSteps = await resolveMacroSteps(steps);
+        if (resolvedSteps === null) { updateStatus('Macro cancelled'); return; }
+        if (!resolvedSteps.length)  { updateStatus('Macro had no runnable steps'); return; }
+
+        if (!isNodeBoardWindow && resolvedSteps.some(step => step.action==='type-text' || step.action==='keyboard-shortcut')) {
           try {
             await invoke('hide_main_window');
             await sleep(140);
@@ -622,15 +853,14 @@
         }
 
         await invoke('run_node_macro', {
-          steps,
+          steps: resolvedSteps,
           uploadedScriptPath: normalizeOptionalString(node?.uploaded_script_path),
           workingDir: normalizeOptionalString(node?.targets?.path)
         });
       } else {
         await invoke('launch_node', {node, action});
       }
-      nodes = nodes.map(n => n.id!==node.id ? n : {...n, last_launched:new Date().toISOString()});
-      queueRender();
+      registerLaunch(node.id);
       updateStatus(`${action} → ${node.name||'node'}`);
     } catch(e) { updateStatus(String(e)); }
   }
@@ -843,8 +1073,11 @@
     if (!cw||!ch) return;
     viewBox = `0 0 ${cw} ${ch}`;
     const next=[];
+    const hidden = hiddenNodeIds || EMPTY_SET;
     for (const node of renderNodes) {
+      if (hidden.has(node.id)) continue;
       for (const targetId of (node.links??[])) {
+        if (hidden.has(targetId)) continue;
         const toNode = renderNodes.find(n=>n.id===targetId);
         if (!toNode) continue;
         const fromEl = nodeElements.get(node.id);
@@ -923,6 +1156,7 @@
                  path:node.targets?.path??'', editor:node.targets?.editor??'',
                  browser:node.targets?.browser??'', script:node.targets?.script??'', color:node.color??'slate',
                  node_type:normalizeNodeType(node.node_type),
+                 group:node.group??'',
                  uploaded_script_path:node.uploaded_script_path??'',
                  uploaded_script_name:node.uploaded_script_name??'',
                  run_macro_on_system_start:Boolean(node.run_macro_on_system_start)};
@@ -1061,6 +1295,7 @@
         icon:        normalizedIcon,
         description: editDraft.description.trim(),
         node_type:   nextType,
+        group:       (editDraft.group||'').trim(),
         uploaded_script_path: uploadedScriptPath,
         uploaded_script_name: uploadedScriptName,
         run_macro_on_system_start: runMacroOnSystemStart,
@@ -1071,6 +1306,12 @@
                        browser:normalizeOptionalString(editDraft.browser), script:normalizeOptionalString(editDraft.script) }
       };
     });
+    // Ensure group metadata exists for any newly-referenced group.
+    const newGroup = (editDraft.group||'').trim();
+    if (newGroup && !groups.some(g=>g.id===newGroup)) {
+      groups = [...groups, normalizeGroup({id:newGroup, name:newGroup, color:editDraft.color})];
+    }
+    groups = normalizeGroups(groups, nodes);
     syncSmooth(true); scheduleSave(); queueRender();
     closeEditor(); updateStatus('Node updated');
   }
@@ -1113,7 +1354,7 @@
     scheduleSave(); queueRender(); closeCtx(); updateStatus('Links cleared');
   }
 
-  /* ─── Launcher ───────────────────────────────────────────────────── */
+  /* ─── Launcher / command palette ─────────────────────────────────── */
   function openLauncher() {
     showLauncher=true; launcherQuery=''; launcherIndex=0;
     void tick().then(()=>{ document.getElementById('launcher-input')?.focus(); });
@@ -1121,9 +1362,14 @@
   function closeLauncher() { showLauncher=false; launcherQuery=''; }
   function launcherKey(event) {
     if (event.key==='Escape') { closeLauncher(); return; }
-    if (event.key==='ArrowDown') { launcherIndex=Math.min(launcherIndex+1,Math.max(0,launcherResults.length-1)); return; }
-    if (event.key==='ArrowUp')   { launcherIndex=Math.max(launcherIndex-1,0); return; }
-    if (event.key==='Enter') { const s=launcherResults[launcherIndex]; if(s){void launchNode(s,'open-path');closeLauncher();} }
+    if (event.key==='ArrowDown') { event.preventDefault(); launcherIndex=Math.min(launcherIndex+1,Math.max(0,launcherResults.length-1)); return; }
+    if (event.key==='ArrowUp')   { event.preventDefault(); launcherIndex=Math.max(launcherIndex-1,0); return; }
+    if (event.key==='Enter') { runLauncherResult(launcherResults[launcherIndex]); }
+  }
+  function runLauncherResult(result) {
+    if (!result) return;
+    closeLauncher();
+    try { result.run(); } catch(e) { updateStatus(String(e)); }
   }
   function hasLaunchTarget(node, action) {
     if (action==='open-path')    return Boolean(node?.targets?.path);
@@ -1132,6 +1378,167 @@
     if (action==='run-macro')    return Array.isArray(node?.macros) && node.macros.length > 0;
     if (action==='open-editor')  return Boolean(node?.targets?.editor||node?.targets?.path);
     return false;
+  }
+  function nodePrimaryAction(node) {
+    for (const action of ['open-path','open-editor','open-browser','run-script','run-macro']) {
+      if (hasLaunchTarget(node, action)) return action;
+    }
+    return null;
+  }
+  const ACTION_ICONS = { 'open-path':'📁','open-editor':'✏️','open-browser':'🌐','run-script':'▶','run-macro':'⚡' };
+  // Lightweight fuzzy subsequence scorer. Returns -1 when there is no match.
+  function fuzzyScore(query, text) {
+    if (!query) return 0;
+    const q = query.toLowerCase(), t = (text||'').toLowerCase();
+    if (!t) return -1;
+    if (t === q) return 1000;
+    let qi=0, score=0, streak=0;
+    for (let ti=0; ti<t.length && qi<q.length; ti++) {
+      if (t[ti]===q[qi]) { qi++; streak++; score += 4 + streak*2 + (ti===0?8:0); }
+      else streak=0;
+    }
+    if (qi < q.length) return -1;
+    if (t.startsWith(q)) score += 20;
+    score -= (t.length - q.length) * 0.15;
+    return score;
+  }
+  function buildCommandResults() {
+    const cmds = [
+      { id:'cmd-add',     title:'Add node',         subtitle:'Create a blank node',         icon:'＋', run:()=>addNode() },
+      { id:'cmd-layout',  title:'Auto layout',      subtitle:'Tidy nodes into a grid',      icon:'⊞', run:()=>layoutGrid() },
+      { id:'cmd-theme',   title:'Cycle theme',      subtitle:`Now: ${THEMES[appSettings.theme]?.label||'Cyan'}`, icon:'🎨', run:()=>cycleTheme() },
+      { id:'cmd-export',  title:'Export workspace', subtitle:'Save active workspace to file', icon:'⭳', run:()=>void exportWorkspace() },
+      { id:'cmd-import',  title:'Import workspace',  subtitle:'Load a .finnode.json file',    icon:'⭱', run:()=>triggerImportWorkspace() }
+    ];
+    for (const ws of workspaces) {
+      if (ws.id === activeWorkspaceId) continue;
+      cmds.push({ id:`cmd-ws-${ws.id}`, title:`Switch to ${ws.name}`, subtitle:'Workspace', icon:'❒', run:()=>void switchWorkspace(ws.id) });
+    }
+    return cmds.map(c => ({ ...c, type:'command' }));
+  }
+  function nodeToResult(node) {
+    const action = nodePrimaryAction(node);
+    return {
+      id:`node-${node.id}`, type:'node', node, action,
+      title: node.name || 'Untitled',
+      subtitle: node.group ? `${groupLabel(node.group)} · ${node.targets?.path || node.targets?.browser || (action?macroActionLabel(action):'no target')}`
+                           : (node.targets?.path || node.targets?.browser || (action?macroActionLabel(action):'no target')),
+      icon: ACTION_ICONS[action] || '◇',
+      color: nodeColor(node),
+      run: () => { if (action) void launchNode(node, action); else updateStatus('Node has no launch target'); }
+    };
+  }
+  function buildLauncherResults(query) {
+    const q = query.trim();
+    if (!q) {
+      const recents = [...nodes]
+        .filter(n => n.last_launched)
+        .sort((a,b)=> String(b.last_launched).localeCompare(String(a.last_launched)))
+        .slice(0,5)
+        .map(nodeToResult);
+      const fallback = recents.length ? recents : nodes.slice(0,5).map(nodeToResult);
+      const cmds = buildCommandResults().slice(0,3);
+      return [...fallback, ...cmds];
+    }
+    const scored = [];
+    for (const node of nodes) {
+      const hay = `${node.name} ${node.targets?.path||''} ${node.targets?.browser||''} ${node.group?groupLabel(node.group):''}`;
+      const s = Math.max(fuzzyScore(q, node.name), fuzzyScore(q, hay) - 4);
+      if (s >= 0) scored.push({ result:nodeToResult(node), score:s + 6 });
+    }
+    for (const cmd of buildCommandResults()) {
+      const s = fuzzyScore(q, cmd.title);
+      if (s >= 0) scored.push({ result:{...cmd}, score:s });
+    }
+    return scored.sort((a,b)=>b.score-a.score).slice(0,8).map(x=>x.result);
+  }
+
+  /* ─── Groups ─────────────────────────────────────────────────────── */
+  function groupById(id)   { return groups.find(g=>g.id===id) || null; }
+  function groupLabel(id)  { const g=groupById(id); return g ? g.name : id; }
+  function toggleGroupCollapsed(id) {
+    groups = groups.map(g => g.id!==id ? g : {...g, collapsed:!g.collapsed});
+    scheduleSave(); queueRender();
+  }
+  function computeGroupHulls(list, grps) {
+    const pad = 26, half = NODE_SIZE/2;
+    const hulls = [];
+    for (const g of grps) {
+      const members = list.filter(n => n.group === g.id);
+      if (!members.length) continue;
+      let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+      for (const m of members) {
+        minX=Math.min(minX, m.renderX); minY=Math.min(minY, m.renderY);
+        maxX=Math.max(maxX, m.renderX+NODE_SIZE); maxY=Math.max(maxY, m.renderY+NODE_SIZE);
+      }
+      hulls.push({
+        id:g.id, name:g.name, collapsed:g.collapsed, color:NODE_COLOR_MAP[g.color]||NODE_COLOR_MAP.cyan,
+        count:members.length,
+        x:minX-pad, y:minY-pad-18, w:(maxX-minX)+pad*2, h:(maxY-minY)+pad*2+18,
+        cx:(minX+maxX)/2 - half, cy:(minY+maxY)/2 - half
+      });
+    }
+    return hulls;
+  }
+
+  /* ─── Drag-drop to create nodes ──────────────────────────────────── */
+  const SCRIPT_EXTS = ['sh','bash','zsh','command','bat','cmd','ps1','py','js','ts','rb','pl'];
+  function looksLikeUrl(s) { return /^(https?:\/\/|www\.)/i.test((s||'').trim()); }
+  function baseName(p) {
+    const norm = (p||'').replace(/[\\/]+$/,'');
+    const parts = norm.split(/[\\/]/);
+    return parts[parts.length-1] || p;
+  }
+  function extOf(p) { const m=/\.([a-z0-9]+)$/i.exec((p||'').trim()); return m ? m[1].toLowerCase() : ''; }
+  function makeNodeFromTarget(target, index) {
+    const node = createEmptyNode(70 + index*26, 90 + index*26);
+    const t = (target||'').trim();
+    if (!t) return null;
+    if (looksLikeUrl(t)) {
+      const url = t.startsWith('http') ? t : `https://${t}`;
+      node.name = baseName(url) || 'Link';
+      node.targets = {...node.targets, browser:url};
+      node.icon = '🌐'; node.color = 'cyan';
+    } else {
+      const ext = extOf(t);
+      node.name = baseName(t);
+      if (SCRIPT_EXTS.includes(ext)) {
+        node.node_type = 'script';
+        node.targets = {...node.targets, script:t, path:t};
+        node.icon = '▶'; node.color = 'green';
+      } else {
+        node.targets = {...node.targets, path:t, editor:t};
+        node.icon = ext ? '📄' : '📁'; node.color = ext ? 'amber' : 'slate';
+      }
+    }
+    return node;
+  }
+  function addNodesFromTargets(targets) {
+    const incoming = (targets||[]).map((t,i)=>makeNodeFromTarget(t,i)).filter(Boolean);
+    if (!incoming.length) return;
+    nodes = [...nodes, ...incoming];
+    syncSmooth(true); scheduleSave();
+    void tick().then(()=>{ clampAllNodesToCanvas(true); queueRender(); });
+    updateStatus(incoming.length===1 ? `Added "${incoming[0].name}"` : `Added ${incoming.length} nodes`);
+  }
+  function onBoardDragOver(event) {
+    if (event.dataTransfer && Array.from(event.dataTransfer.types||[]).some(t=>t==='text/uri-list'||t==='text/plain')) {
+      event.preventDefault();
+      isDropActive = true;
+    }
+  }
+  function onBoardDragLeave(event) {
+    if (event.relatedTarget && event.currentTarget.contains(event.relatedTarget)) return;
+    isDropActive = false;
+  }
+  function onBoardDrop(event) {
+    event.preventDefault();
+    isDropActive = false;
+    const dt = event.dataTransfer; if (!dt) return;
+    const raw = dt.getData('text/uri-list') || dt.getData('text/plain');
+    if (!raw) return;
+    const targets = raw.split(/\r?\n/).map(s=>s.trim()).filter(s=>s && !s.startsWith('#'));
+    if (targets.length) addNodesFromTargets(targets);
   }
 
   /* ─── Hover / resize ─────────────────────────────────────────────── */
@@ -1166,6 +1573,18 @@
       showLauncher ? closeLauncher() : openLauncher();
     });
 
+    // OS file/folder drops (handled by Tauri's webview, not the DOM drop event).
+    let unlistenFileDrop = () => {};
+    try {
+      unlistenFileDrop = await appWindow.onFileDropEvent(ev => {
+        const payload = ev?.payload;
+        if (!payload) return;
+        if (payload.type === 'hover') { isDropActive = true; }
+        else if (payload.type === 'drop') { isDropActive = false; addNodesFromTargets(payload.paths || []); }
+        else { isDropActive = false; }
+      });
+    } catch (_) {}
+
     // Try to push desktop window to the bottom layer (needs custom Rust command)
     if (currentWindowLabel==='desktop') {
       try { await invoke('set_window_bottom'); } catch(_) {}
@@ -1197,7 +1616,7 @@
     window.addEventListener('pointerdown', onDown);
     window.addEventListener('keydown',     onKey);
     return ()=>{
-      unlistenLayout(); unlistenLauncher();
+      unlistenLayout(); unlistenLauncher(); unlistenFileDrop();
       teardownReducedMotion();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('pointermove', onMove);
@@ -1224,13 +1643,29 @@
   });
   $: contextNode = contextMenu.nodeId ? nodes.find(n=>n.id===contextMenu.nodeId)??null : null;
   $: editNode    = editPopup.nodeId   ? nodes.find(n=>n.id===editPopup.nodeId)??null   : null;
-  $: launcherResults = launcherQuery.trim()
-    ? nodes.filter(n=>n.name.toLowerCase().includes(launcherQuery.toLowerCase())).slice(0,8)
-    : nodes.slice(0,8);
+  // Command palette results (depends on query, nodes, workspaces, theme).
+  $: launcherResults = (showLauncher, buildLauncherResults(launcherQuery));
+  $: if (launcherIndex > launcherResults.length-1) launcherIndex = Math.max(0, launcherResults.length-1);
+
+  // Group rendering: hide members of collapsed groups, draw hulls behind nodes.
+  $: collapsedGroupIds = new Set(groups.filter(g=>g.collapsed).map(g=>g.id));
+  $: hiddenNodeIds = new Set(renderNodes.filter(n=>n.group && collapsedGroupIds.has(n.group)).map(n=>n.id));
+  $: boardNodes = renderNodes.filter(n=>!hiddenNodeIds.has(n.id));
+  $: groupHulls = computeGroupHulls(renderNodes, groups);
+
+  // Usage analytics (surfaced in the settings Insights panel).
+  $: realNodes = nodes.filter(n=>n.id!==MAIN_NODE_ID);
+  $: totalLaunches = realNodes.reduce((sum,n)=>sum+(Number(n.launch_count)||0), 0);
+  $: mostUsedNodes = [...realNodes]
+       .filter(n=>(Number(n.launch_count)||0)>0)
+       .sort((a,b)=>(Number(b.launch_count)||0)-(Number(a.launch_count)||0))
+       .slice(0,3);
+
   $: isNodeBoardWindow = currentWindowLabel==='desktop';
   $: if (typeof document!=='undefined') {
-    document.documentElement.classList.toggle('desktop-overlay-window', isNodeBoardWindow);
-    document.body.classList.toggle('desktop-mode', isNodeBoardWindow);
+    document.documentElement.classList.toggle('desktop-overlay-window', isNodeBoardWindow && !showcaseMode);
+    document.body.classList.toggle('desktop-mode', isNodeBoardWindow && !showcaseMode);
+    document.body.classList.toggle('showcase-mode', showcaseMode);
   }
   $: {
     const validIds=new Set(nodes.map(n=>n.id));
@@ -1241,10 +1676,48 @@
     if (expandedNodeId&&!validIds.has(expandedNodeId))   expandedNodeId=null;
   }
 
+  // Web-only preview affordance (documented in README): `?view=board` renders
+  // the node-board surface in a plain browser; `?showcase=1` uses an opaque
+  // backdrop. In a real Tauri window the per-window label always wins.
+  function resolveWindowLabel() {
+    const fallback = appWindow?.label ?? 'main';
+    if (typeof window === 'undefined') return fallback;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const v = (params.get('view') || '').toLowerCase();
+      showcaseMode = params.get('showcase') === '1';
+      if (v === 'board' || v === 'desktop') return 'desktop';
+      if (v === 'settings' || v === 'main') return 'main';
+    } catch (_) {}
+    return fallback;
+  }
+
+  // Web-preview affordances (no-ops inside the Tauri shell): deep-link to UI
+  // states so the documented browser preview can show themes, the launcher, or
+  // the node editor directly. e.g. ?view=board&theme=violet&bg=aurora&launcher=1
+  function applyPreviewAffordances() {
+    if (HAS_TAURI || typeof window === 'undefined') return;
+    let params;
+    try { params = new URLSearchParams(window.location.search); } catch (_) { return; }
+    const theme = params.get('theme');
+    if (theme && THEME_IDS.includes(theme)) { appSettings = {...appSettings, theme}; applyAppearance(); }
+    const bg = params.get('bg');
+    if (bg && BOARD_BACKGROUND_IDS.includes(bg)) appSettings = {...appSettings, board_background: bg};
+    const collapse = params.get('collapse');
+    if (collapse) groups = groups.map(g => g.id===collapse ? {...g, collapsed:true} : g);
+    const edit = params.get('edit');
+    if (edit) void tick().then(()=>openEditor(edit));
+    if (params.get('launcher') === '1') {
+      openLauncher();
+      const q = params.get('q');
+      if (q) void tick().then(()=>{ launcherQuery = q; });
+    }
+  }
+
   onMount(()=>{
-    currentWindowLabel=appWindow.label??'main';
+    currentWindowLabel=resolveWindowLabel();
     let disposed=false, cleanup=()=>{};
-    void bootstrap().then(fn=>{ if(disposed){fn();return;} cleanup=fn; })
+    void bootstrap().then(fn=>{ if(disposed){fn();return;} cleanup=fn; applyPreviewAffordances(); })
       .catch(e=>{ fatalError=e?.stack??e?.message??String(e); });
     return ()=>{
       disposed=true; cleanup();
@@ -1278,13 +1751,19 @@
         </div>
 
         <!-- Canvas: bind canvasEl here (outer, unscaled logical container) -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
         <div
           class="canvas"
           class:canvas--panning={isPanning}
+          class:canvas--drop={isDropActive}
+          data-board-bg={appSettings.board_background}
           bind:this={canvasEl}
           on:pointerdown={beginCanvasPan}
           on:auxclick={preventMiddleAuxClick}
           on:wheel|passive={onWheelZoom}
+          on:dragover={onBoardDragOver}
+          on:dragleave={onBoardDragLeave}
+          on:drop={onBoardDrop}
         >
 
           <!-- Decorative background affected by opacity slider -->
@@ -1292,6 +1771,16 @@
             <div class="canvas-glow"></div>
             <div class="canvas-dots"></div>
           </div>
+
+          <!-- Drag-drop hint overlay -->
+          {#if isDropActive}
+            <div class="drop-overlay" aria-hidden="true">
+              <div class="drop-overlay-inner">
+                <span class="drop-overlay-icon">⤓</span>
+                <span>Drop files, folders, or links to create nodes</span>
+              </div>
+            </div>
+          {/if}
 
           <!-- Zoom root: both SVG links + nodes scale together -->
           <div class="zoom-root"
@@ -1319,8 +1808,32 @@
               {/each}
             </svg>
 
+            <!-- Group hulls (behind nodes) + collapsed group chips -->
+            {#each groupHulls as hull (hull.id)}
+              {#if hull.collapsed}
+                <button class="group-chip" style="left:{hull.cx}px;top:{hull.cy}px;--gc:{hull.color}"
+                  on:pointerdown|stopPropagation
+                  on:click|stopPropagation={()=>toggleGroupCollapsed(hull.id)}
+                  title="Expand group">
+                  <span class="group-chip-icon">▸</span>
+                  <span class="group-chip-name">{hull.name}</span>
+                  <span class="group-chip-count">{hull.count}</span>
+                </button>
+              {:else}
+                <div class="group-hull" style="left:{hull.x}px;top:{hull.y}px;width:{hull.w}px;height:{hull.h}px;--gc:{hull.color}" aria-hidden="true">
+                  <button class="group-hull-label"
+                    on:pointerdown|stopPropagation
+                    on:click|stopPropagation={()=>toggleGroupCollapsed(hull.id)}
+                    title="Collapse group">
+                    <span class="group-hull-dot"></span>{hull.name}
+                    <span class="group-hull-toggle">▾</span>
+                  </button>
+                </div>
+              {/if}
+            {/each}
+
             <!-- Nodes -->
-            {#each renderNodes as node (node.id)}
+            {#each boardNodes as node (node.id)}
               <div
                 class="node"
                 class:node--selected={selectedIds.has(node.id)}
@@ -1531,9 +2044,82 @@
             <input bind:value={workspaceName} placeholder="New workspace name…" />
             <button class="btn-accent" on:click={createWorkspace}>+</button>
           </div>
+          <div class="btn-pair">
+            <button class="btn-ghost" on:click={exportWorkspace} title="Export active workspace to a shareable file">⭳ Export</button>
+            <button class="btn-ghost" on:click={triggerImportWorkspace} title="Import a .finnode.json workspace">⭱ Import</button>
+          </div>
+          <input id="workspace-import-input" type="file" accept=".json,application/json" class="hidden-file" on:change={handleWorkspaceImport} />
           <button class="btn-danger" disabled={workspaces.length<=1} on:click={()=>deleteWorkspace(activeWorkspaceId)}>
             Delete workspace
           </button>
+        </section>
+
+        <!-- Appearance -->
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Appearance</h2>
+            <span class="badge">{THEMES[appSettings.theme]?.label||'Cyan'}</span>
+          </div>
+          <span class="field-label">Theme</span>
+          <div class="theme-swatches">
+            {#each THEME_IDS as id}
+              <button type="button"
+                class="theme-swatch"
+                class:theme-swatch--active={appSettings.theme===id}
+                style="--ta:{THEMES[id].accent};--tb:{THEMES[id].accent2}"
+                on:click={()=>setTheme(id)}
+                title={THEMES[id].label}
+                aria-label={THEMES[id].label}
+              ></button>
+            {/each}
+          </div>
+          <span class="field-label" style="margin-top:10px">Board background</span>
+          <div class="bg-options">
+            {#each BOARD_BACKGROUNDS as bg}
+              <button type="button"
+                class="bg-option"
+                class:bg-option--active={appSettings.board_background===bg.id}
+                on:click={()=>setBoardBackground(bg.id)}
+              >{bg.label}</button>
+            {/each}
+          </div>
+        </section>
+
+        <!-- Insights -->
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Insights</h2>
+            <span class="badge">{totalLaunches}</span>
+          </div>
+          <div class="insights-stats">
+            <div class="insight-stat">
+              <span class="insight-val">{totalLaunches}</span>
+              <span class="insight-lbl">launches</span>
+            </div>
+            <div class="insight-stat">
+              <span class="insight-val">{realNodes.length}</span>
+              <span class="insight-lbl">nodes</span>
+            </div>
+            <div class="insight-stat">
+              <span class="insight-val">{groups.length}</span>
+              <span class="insight-lbl">groups</span>
+            </div>
+          </div>
+          {#if mostUsedNodes.length}
+            <span class="field-label" style="margin-top:10px">Most used</span>
+            <div class="most-used">
+              {#each mostUsedNodes as n (n.id)}
+                <button class="most-used-row" style="--nc:{nodeColor(n)}"
+                  on:click={()=>{ const a=nodePrimaryAction(n); if(a) void launchNode(n,a); }}>
+                  <span class="most-used-pip"></span>
+                  <span class="most-used-name" title={n.name||'Untitled'}>{n.name||'Untitled'}</span>
+                  <span class="most-used-count">{n.launch_count}×</span>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="muted" style="padding:6px 2px 0">Launch nodes to build usage insights.</p>
+          {/if}
         </section>
 
         <!-- Nodes -->
@@ -1647,13 +2233,24 @@
           </label>
         </div>
 
-        <label class="field">
-          <span>Node type</span>
-          <select bind:value={editDraft.node_type}>
-            <option value="default">Default</option>
-            <option value="script">Script</option>
-          </select>
-        </label>
+        <div class="editor-grid">
+          <label class="field">
+            <span>Node type</span>
+            <select bind:value={editDraft.node_type}>
+              <option value="default">Default</option>
+              <option value="script">Script</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Group</span>
+            <input list="group-options" bind:value={editDraft.group} placeholder="None" />
+            <datalist id="group-options">
+              {#each groups as g (g.id)}
+                <option value={g.name}></option>
+              {/each}
+            </datalist>
+          </label>
+        </div>
 
         <label class="field field-toggle">
           <span>Run Macro On System Start</span>
@@ -1891,33 +2488,63 @@
         <div class="launcher-search">
           <span class="launcher-icon">⌘</span>
           <input id="launcher-input" class="launcher-input"
-            placeholder="Search nodes…"
+            placeholder="Search nodes, run macros, type a command…"
             bind:value={launcherQuery}
             on:keydown={launcherKey} />
           {#if launcherQuery}
             <button class="launcher-clear" on:click={()=>launcherQuery=''}>✕</button>
           {/if}
         </div>
+        {#if !launcherQuery.trim()}
+          <div class="launcher-section-label">Recent &amp; commands</div>
+        {/if}
         <div class="launcher-list">
-          {#each launcherResults as node, i (node.id)}
-            <button class="launcher-item" class:launcher-item--active={i===launcherIndex}
+          {#each launcherResults as result, i (result.id)}
+            <button class="launcher-item"
+              class:launcher-item--active={i===launcherIndex}
+              class:launcher-item--command={result.type==='command'}
               in:fly={{ y: 6, duration: motionDuration(150), delay: prefersReducedMotion ? 0 : i * 22, opacity: 0 }}
               out:fade={{ duration: motionDuration(80) }}
-              on:click={()=>{void launchNode(node,'open-path');closeLauncher();}}>
-              <span class="launcher-item-dot" style="background:{nodeColor(node)}"></span>
-              <span class="launcher-item-name">{node.name||'Untitled'}</span>
-              {#if node.targets?.path}
-                <span class="launcher-item-path">{node.targets.path}</span>
+              on:mouseenter={()=>launcherIndex=i}
+              on:click={()=>runLauncherResult(result)}>
+              <span class="launcher-item-glyph" style={result.type==='node' ? `color:${result.color}` : ''}>{result.icon}</span>
+              <span class="launcher-item-name">{result.title}</span>
+              {#if result.subtitle}
+                <span class="launcher-item-path">{result.subtitle}</span>
               {/if}
+              <span class="launcher-item-kind">{result.type==='command' ? 'cmd' : (result.action ? result.action.replace('open-','').replace('run-','') : '')}</span>
             </button>
           {/each}
           {#if launcherResults.length===0}
-            <div class="launcher-empty">No matching nodes</div>
+            <div class="launcher-empty">No matching nodes or commands</div>
           {/if}
         </div>
         <div class="launcher-hint">
-          <kbd>↑↓</kbd> navigate &nbsp; <kbd>↵</kbd> open &nbsp; <kbd>esc</kbd> close
+          <kbd>↑↓</kbd> navigate &nbsp; <kbd>↵</kbd> run &nbsp; <kbd>esc</kbd> close
         </div>
+      </section>
+    </div>
+  {/if}
+
+  <!-- ══════════════════════ MACRO PROMPT DIALOG ══════════════════════ -->
+  {#if promptDialog.open}
+    <div class="modal-overlay prompt-overlay" role="presentation"
+      in:fade={{ duration: motionDuration(120) }} out:fade={{ duration: motionDuration(90) }}>
+      <section class="prompt-modal"
+        in:scale={{ duration: motionDuration(160), start: 0.96 }}
+        out:scale={{ duration: motionDuration(110), start: 0.99 }}>
+        <header class="prompt-header">
+          <span class="prompt-spark">⌨</span>
+          <h3>{promptDialog.label}</h3>
+        </header>
+        <input id="macro-prompt-input" class="prompt-input"
+          bind:value={promptDialog.value}
+          on:keydown={promptDialogKey}
+          placeholder="Type a value…" />
+        <footer class="prompt-footer">
+          <button class="btn-accent" on:click={confirmPromptDialog}>Continue</button>
+          <button class="btn-ghost"  on:click={cancelPromptDialog}>Cancel</button>
+        </footer>
       </section>
     </div>
   {/if}
@@ -2255,13 +2882,47 @@
       transparent;
   }
 
-  /* Dot-grid pattern */
+  /* Board background patterns (theme-aware, switch via data-board-bg) */
   .canvas-dots {
     position:absolute; inset:0; pointer-events:none;
-    opacity:.22;
-    background-image:radial-gradient(circle, rgba(94,231,247,.55) 1px, transparent 1px);
+    opacity:.30;
+    background-image:radial-gradient(circle, var(--accent) 1px, transparent 1px);
     background-size:28px 28px;
+    transition:opacity var(--motion-base) var(--motion-curve), background-size var(--motion-base) var(--motion-curve);
   }
+  .canvas[data-board-bg="grid"] .canvas-dots {
+    opacity:.16;
+    background-image:
+      linear-gradient(var(--accent) 1px, transparent 1px),
+      linear-gradient(90deg, var(--accent) 1px, transparent 1px);
+    background-size:34px 34px, 34px 34px;
+  }
+  .canvas[data-board-bg="aurora"] .canvas-dots {
+    opacity:.5;
+    background-image:
+      radial-gradient(40% 50% at 20% 18%, var(--accent) 0%, transparent 60%),
+      radial-gradient(40% 50% at 82% 82%, var(--accent2) 0%, transparent 60%);
+    background-size:cover, cover;
+    filter:blur(8px);
+  }
+  .canvas[data-board-bg="void"] .canvas-dots { opacity:0; }
+  .canvas[data-board-bg="aurora"] .canvas-glow { opacity:.6; }
+
+  /* Drop-to-create overlay */
+  .canvas--drop { outline:2px dashed var(--accent); outline-offset:-10px; }
+  .drop-overlay {
+    position:absolute; inset:0; z-index:40; pointer-events:none;
+    display:grid; place-items:center;
+    background:radial-gradient(ellipse at center, var(--accent-glow, rgba(94,231,247,.18)) 0%, transparent 70%);
+  }
+  .drop-overlay-inner {
+    display:flex; flex-direction:column; align-items:center; gap:8px;
+    padding:22px 30px; border-radius:var(--r-lg);
+    border:1.5px dashed var(--accent); background:rgba(6,9,15,.7);
+    color:var(--accent); font-size:.84rem; font-weight:600; letter-spacing:.02em;
+    box-shadow:0 0 40px var(--accent-glow, rgba(94,231,247,.25));
+  }
+  .drop-overlay-icon { font-size:1.8rem; line-height:1; }
 
   /* zoom-root: scaled container for both SVG + nodes */
   .zoom-root {
@@ -2850,7 +3511,6 @@
     cursor:pointer; transition:all var(--motion-fast) var(--motion-curve);
   }
   .launcher-item:hover, .launcher-item--active { background:rgba(94,231,247,.06); border-color:rgba(94,231,247,.16); }
-  .launcher-item-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
   .launcher-item-name { flex:1; font-size:.82rem; font-weight:500; }
   .launcher-item-path { font-size:.68rem; color:var(--dim); max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .launcher-empty { padding:18px; font-size:.78rem; color:var(--dim); text-align:center; }
@@ -2906,4 +3566,127 @@
       align-items:flex-start;
     }
   }
+
+  /* ════════════════ NEW FEATURE STYLES ════════════════════════════ */
+  .hidden-file { display:none; }
+  .field-label {
+    display:block; font-size:.6rem; font-weight:600; text-transform:uppercase;
+    letter-spacing:.13em; color:var(--soft); margin-bottom:7px;
+  }
+  .btn-pair { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
+
+  /* Appearance: theme swatches + board background */
+  .theme-swatches { display:flex; gap:8px; flex-wrap:wrap; }
+  .theme-swatch {
+    width:30px; height:30px; border-radius:9px; padding:0; cursor:pointer;
+    border:1px solid var(--border);
+    background:linear-gradient(135deg, var(--ta) 0%, var(--ta) 50%, var(--tb) 50%, var(--tb) 100%);
+    box-shadow:0 0 0 0 transparent; transition:transform 120ms, box-shadow 160ms, border-color 160ms;
+  }
+  .theme-swatch:hover { transform:translateY(-1px); }
+  .theme-swatch--active {
+    border-color:var(--ta);
+    box-shadow:0 0 0 2px rgba(6,9,15,.9), 0 0 0 4px var(--ta), 0 0 14px var(--ta);
+  }
+  .bg-options { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .bg-option {
+    padding:7px 4px; font-size:.68rem; color:var(--soft);
+    background:rgba(6,9,15,.5); border:1px solid var(--border); border-radius:var(--r-sm);
+  }
+  .bg-option:hover { color:var(--text); border-color:rgba(110,170,220,.3); }
+  .bg-option--active {
+    color:var(--accent); border-color:rgba(94,231,247,.4);
+    background:linear-gradient(135deg, rgba(94,231,247,.16), rgba(94,231,247,.06));
+  }
+
+  /* Insights */
+  .insights-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .insight-stat {
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+    padding:10px 6px; border:1px solid var(--bsoft); border-radius:var(--r-sm);
+    background:rgba(6,9,15,.45);
+  }
+  .insight-val { font-size:1.15rem; font-weight:700; color:var(--accent); line-height:1; font-variant-numeric:tabular-nums; }
+  .insight-lbl { font-size:.58rem; text-transform:uppercase; letter-spacing:.12em; color:var(--soft); }
+  .most-used { display:flex; flex-direction:column; gap:5px; }
+  .most-used-row {
+    display:flex; align-items:center; gap:9px; padding:7px 9px;
+    border:1px solid var(--bsoft); border-radius:var(--r-sm);
+    background:rgba(6,9,15,.45); color:var(--text); text-align:left;
+  }
+  .most-used-row:hover { border-color:rgba(94,231,247,.28); background:rgba(94,231,247,.05); }
+  .most-used-pip { width:8px; height:8px; border-radius:50%; background:var(--nc); box-shadow:0 0 8px var(--nc); flex-shrink:0; }
+  .most-used-name { flex:1; font-size:.78rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .most-used-count { font-size:.7rem; font-weight:700; color:var(--accent); font-variant-numeric:tabular-nums; }
+
+  /* Group hulls + chips on the board */
+  .group-hull {
+    position:absolute; border-radius:18px; pointer-events:none; z-index:0;
+    border:1.5px dashed color-mix(in srgb, var(--gc) 55%, transparent);
+    background:color-mix(in srgb, var(--gc) 8%, transparent);
+    box-shadow:inset 0 0 30px color-mix(in srgb, var(--gc) 10%, transparent);
+  }
+  .group-hull-label {
+    position:absolute; top:-2px; left:14px;
+    display:inline-flex; align-items:center; gap:6px; pointer-events:auto;
+    padding:3px 10px; border-radius:999px; cursor:pointer;
+    font-size:.66rem; font-weight:700; letter-spacing:.04em;
+    color:var(--gc);
+    background:rgba(6,9,15,.85); border:1px solid color-mix(in srgb, var(--gc) 45%, transparent);
+  }
+  .group-hull-dot { width:7px; height:7px; border-radius:50%; background:var(--gc); box-shadow:0 0 8px var(--gc); }
+  .group-hull-toggle { opacity:.7; font-size:.6rem; }
+  .group-chip {
+    position:absolute; z-index:3; transform:translate(-12px,-6px);
+    display:inline-flex; align-items:center; gap:8px; cursor:pointer;
+    padding:9px 14px; border-radius:14px;
+    color:var(--gc); font-size:.8rem; font-weight:700;
+    background:rgba(8,12,20,.92);
+    border:1px solid color-mix(in srgb, var(--gc) 50%, transparent);
+    box-shadow:0 6px 22px rgba(0,0,0,.5), 0 0 18px color-mix(in srgb, var(--gc) 22%, transparent);
+  }
+  .group-chip:hover { transform:translate(-12px,-8px); }
+  .group-chip-icon { font-size:.7rem; }
+  .group-chip-count {
+    font-size:.66rem; padding:1px 7px; border-radius:999px;
+    background:color-mix(in srgb, var(--gc) 20%, transparent);
+  }
+
+  /* Command palette additions */
+  .launcher-section-label {
+    font-size:.58rem; text-transform:uppercase; letter-spacing:.14em;
+    color:var(--dim); padding:2px 4px 6px;
+  }
+  .launcher-item-glyph { width:20px; text-align:center; font-size:.92rem; flex-shrink:0; }
+  .launcher-item--command .launcher-item-glyph { color:var(--accent2); }
+  .launcher-item-kind {
+    font-size:.58rem; text-transform:uppercase; letter-spacing:.1em;
+    color:var(--dim); padding:2px 6px; border-radius:6px;
+    border:1px solid var(--bsoft); flex-shrink:0;
+  }
+  .launcher-item--command .launcher-item-kind { color:var(--accent2); border-color:rgba(176,158,255,.25); }
+
+  /* Macro prompt dialog */
+  .prompt-overlay { z-index:120; }
+  .prompt-modal {
+    width:min(420px, 92vw);
+    border-radius:var(--r-lg); padding:20px;
+    border:1px solid rgba(94,231,247,.24);
+    background:linear-gradient(155deg, var(--s2), var(--s1));
+    box-shadow:0 24px 60px rgba(0,0,0,.6), 0 0 40px var(--accent-glow, rgba(94,231,247,.18));
+  }
+  .prompt-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .prompt-header h3 { margin:0; font-size:.95rem; font-weight:600; color:var(--text); }
+  .prompt-spark {
+    width:30px; height:30px; border-radius:9px; display:grid; place-items:center; flex-shrink:0;
+    color:var(--accent); background:rgba(94,231,247,.12); border:1px solid rgba(94,231,247,.25);
+  }
+  .prompt-input {
+    width:100%; font:inherit; font-size:.9rem; color:var(--text);
+    border-radius:var(--r-sm); border:1px solid rgba(94,231,247,.3);
+    background:rgba(6,9,15,.8); padding:11px 13px; outline:none;
+  }
+  .prompt-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(94,231,247,.1); }
+  .prompt-footer { display:flex; gap:8px; margin-top:16px; }
+  .prompt-footer .btn-accent { flex:1; }
 </style>
