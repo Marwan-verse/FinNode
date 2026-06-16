@@ -921,6 +921,46 @@
     [...selectedIds].forEach(deleteNode); selectedIds = new Set();
   }
 
+  /* ─── Quick grouping ─────────────────────────────────────────────── */
+  // Assign a set of node ids to a group (creating the group if new). Passing an
+  // empty name ungroups them. Main node is never grouped.
+  function assignNodesToGroup(ids, rawName) {
+    const idSet = ids instanceof Set ? ids : new Set(ids);
+    const name = (rawName || '').trim();
+    let count = 0;
+    nodes = nodes.map(n => {
+      if (!idSet.has(n.id) || n.id === MAIN_NODE_ID) return n;
+      count++;
+      return {...n, group: name};
+    });
+    if (name && !groups.some(g => g.id === name)) {
+      const palette = NODE_COLORS.filter(c => c !== 'slate');
+      const color = palette[groups.length % palette.length] || 'cyan';
+      groups = [...groups, normalizeGroup({id: name, name, color})];
+    }
+    groups = normalizeGroups(groups, nodes);
+    syncSmooth(true); scheduleSave(); queueRender();
+    return { count, name };
+  }
+  async function groupSelectedNodes() {
+    if (selectedIds.size === 0) return;
+    const ids = new Set(selectedIds);
+    const name = await openPromptDialog('Name this group');
+    if (name === null) return;
+    const { count } = assignNodesToGroup(ids, name);
+    selectedIds = new Set();
+    updateStatus(name.trim() ? `Grouped ${count} node${count===1?'':'s'} into "${name.trim()}"` : 'Removed from group');
+  }
+  async function groupSingleNode(nodeId) {
+    if (!nodeId || nodeId === MAIN_NODE_ID) return;
+    const node = nodes.find(n => n.id === nodeId);
+    const current = node?.group || '';
+    const name = await openPromptDialog(current ? `Move "${node?.name||'node'}" to group` : `Add "${node?.name||'node'}" to a group`);
+    if (name === null) return;
+    assignNodesToGroup([nodeId], name);
+    updateStatus(name.trim() ? `Added to "${name.trim()}"` : 'Removed from group');
+  }
+
   /* ─── Drag ───────────────────────────────────────────────────────── */
   // Positions are in LOGICAL (pre-zoom) space.
   // nodeLayer is the zoom-root (scaled), canvasEl is unscaled outer container.
@@ -2138,6 +2178,7 @@
             <div class="sel-bar">
               <span>{selectedIds.size} selected</span>
               <button on:click={batchLaunch}>Open all</button>
+              <button on:click={groupSelectedNodes}>⊟ Group</button>
               <button class="danger" on:click={batchDelete}>Delete</button>
               <button on:click={()=>selectedIds=new Set()}>✕</button>
             </div>
@@ -2458,6 +2499,10 @@
       <div class="ctx-group">
         {#if !isLockedNode(contextNode)}
           <button on:click={openEditorFromMenu}>⚙ Edit node</button>
+          <button on:click={()=>{ const id=contextNode.id; closeCtx(); void groupSingleNode(id); }}>⊟ {contextNode.group ? 'Change group…' : 'Add to group…'}</button>
+          {#if contextNode.group}
+            <button on:click={()=>{ assignNodesToGroup([contextNode.id], ''); closeCtx(); updateStatus('Removed from group'); }}>⊟ Remove from group</button>
+          {/if}
         {/if}
         <button on:click={addConnected}>⊕ Add connected</button>
         <button on:click={connectNearest}>⟶ Connect nearest</button>

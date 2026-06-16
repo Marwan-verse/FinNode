@@ -21,10 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-13 (Ventura) — Tauri v1's bundler is unreliable on the
-          # macos-latest (15) image's icon/codesign tooling.
-          - platform: macos-13
-            args: "--target universal-apple-darwin --verbose"
+          # The earlier icon-bundler failure was the .ico in bundle.icon (now
+          # stripped for non-Windows), not the runner — so use the readily
+          # available macos-latest instead of the scarce, long-queuing macos-13.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
           # Build only the AppImage on Linux (the .deb bundler step fails on the
           # runner, and the website links to the AppImage anyway).

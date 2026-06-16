@@ -9,6 +9,7 @@ The format is inspired by Keep a Changelog and Semantic Versioning principles.
 ### Added
 
 - Node groups: cluster nodes into labelled groups with translucent hulls and collapse-to-chip
+- Quick grouping: select nodes and click "Group", or right-click a node → "Add to group" — no need to open the editor
 - Appearance themes: six accent themes and four board backgrounds (dots, grid, aurora, void), persisted
 - Command palette upgrade: fuzzy search across nodes, runnable macros, recents, and quick commands
 - Macro variables: `{{clipboard}}`, `{{date}}`, `{{time}}`, `{{datetime}}` tokens plus a `prompt-input` step feeding `{{input}}`
